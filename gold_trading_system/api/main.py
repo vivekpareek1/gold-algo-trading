@@ -202,6 +202,12 @@ def get_trades():
     return {"trades": live_engine.state.trade_log}
 
 
+@app.get("/api/candles")
+def get_candles():
+    """Recent OHLCV history for the chart — bounded, see LiveEngineState."""
+    return {"candles": live_engine.state.candle_history}
+
+
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
     """Pushes a fresh snapshot every ~2 seconds. In LIVE mode this just reads
@@ -228,28 +234,78 @@ _DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Gold Trading System — Live</title>
+<title>GOLDM — Live Paper Trading</title>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-  body { background:#0B0D0F; color:#E7E9EC; font-family: 'Segoe UI', Arial, sans-serif; margin:0; padding:20px; }
-  .mono { font-family: 'Courier New', monospace; }
-  .grid { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:16px; margin-top:16px; }
-  .card { background:#14171A; border:1px solid #22262B; border-radius:8px; padding:16px; }
-  .card h3 { margin:0 0 12px 0; font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:#8A93A3; }
-  .big { font-size:28px; font-weight:700; }
-  .row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #22262B; font-size:14px; }
-  .bull { color:#3FA796; } .bear { color:#B8483C; } .gold { color:#C9A227; }
-  .badge { display:inline-block; padding:3px 8px; border-radius:4px; font-size:11px; text-transform:uppercase; }
-  .badge.live { background:rgba(63,167,150,0.15); color:#3FA796; }
-  .badge.sim { background:rgba(201,162,39,0.15); color:#C9A227; }
-  #status { font-size:12px; color:#565D69; margin-top:8px; }
+  :root {
+    --bg: #0B0D0F; --panel: #14171A; --panel-border: #22262B;
+    --gold: #C9A227; --gold-dim: #8A7220;
+    --bull: #3FA796; --bear: #B8483C;
+    --text: #E7E9EC; --text-dim: #8A93A3; --text-faint: #565D69;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); margin: 0; padding: 20px;
+    font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+  }
+  .mono { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding-bottom: 14px; margin-bottom: 16px; border-bottom: 1px solid var(--panel-border);
+  }
+  .symbol { color: var(--gold); font-weight: 700; font-size: 20px; letter-spacing: 0.02em; }
+  .price { font-size: 26px; font-weight: 700; }
+  .change { font-size: 13px; }
+  .badge {
+    padding: 3px 9px; border-radius: 4px; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+  }
+  .badge.live { background: rgba(63,167,150,0.14); color: var(--bull); border: 1px solid rgba(63,167,150,0.35); }
+  .badge.sim { background: rgba(201,162,39,0.14); color: var(--gold); border: 1px solid rgba(201,162,39,0.35); }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--bull); animation: pulse 2s infinite; margin-left: auto; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  #chart-container { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+  #chart { height: 380px; }
+  .chart-empty {
+    height: 380px; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); font-size: 13px; text-align: center; flex-direction: column; gap: 8px;
+  }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 8px; padding: 16px; }
+  .card h3 {
+    margin: 0 0 12px 0; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-faint); font-weight: 600;
+  }
+  .row {
+    display: flex; justify-content: space-between; padding: 7px 0;
+    border-bottom: 1px solid var(--panel-border); font-size: 13.5px;
+  }
+  .row:last-child { border-bottom: none; }
+  .row span:first-child { color: var(--text-dim); }
+  .bull { color: var(--bull); } .bear { color: var(--bear); } .gold { color: var(--gold); }
+  .empty-note { color: var(--text-faint); font-size: 13px; }
+
+  #status { font-size: 11px; color: var(--text-faint); margin-top: 14px; }
 </style>
 </head>
 <body>
-  <div style="display:flex; align-items:center; gap:12px;">
-    <span class="gold mono" style="font-size:22px; font-weight:700;">GOLDM</span>
-    <span id="ltp" class="mono big">--</span>
+  <header>
+    <span class="symbol mono">GOLDM</span>
+    <span id="ltp" class="mono price">--</span>
+    <span id="change" class="mono change">--</span>
     <span id="feedBadge" class="badge sim">Loading...</span>
+    <span class="pulse"></span>
+  </header>
+
+  <div id="chart-container">
+    <div id="chartEmpty" class="chart-empty">
+      Waiting for the first candle — chart appears once real data starts flowing.
+    </div>
+    <div id="chart" style="display:none;"></div>
   </div>
 
   <div class="grid">
@@ -261,7 +317,7 @@ _DASHBOARD_HTML = """
     </div>
     <div class="card">
       <h3>Open Position</h3>
-      <div id="posDetails">No open position</div>
+      <div id="posDetails" class="empty-note">No open position</div>
     </div>
     <div class="card">
       <h3>Risk State</h3>
@@ -272,9 +328,9 @@ _DASHBOARD_HTML = """
     </div>
   </div>
 
-  <div class="card" style="margin-top:16px;">
+  <div class="card" style="margin-top:14px;">
     <h3>Recent Trades</h3>
-    <div id="tradesList">Loading...</div>
+    <div id="tradesList" class="empty-note">No trades yet this session.</div>
   </div>
 
   <div id="status">Connecting...</div>
@@ -282,11 +338,68 @@ _DASHBOARD_HTML = """
 <script>
 function fmt(n) { return typeof n === 'number' ? n.toLocaleString('en-IN', {maximumFractionDigits:2}) : n; }
 
+let chart = null;
+let candleSeries = null;
+let lastClose = null;
+let chartInitialized = false;
+
+function initChart() {
+  document.getElementById('chartEmpty').style.display = 'none';
+  document.getElementById('chart').style.display = 'block';
+  chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    height: 380,
+    layout: { background: { color: '#14171A' }, textColor: '#8A93A3' },
+    grid: { vertLines: { color: '#22262B' }, horzLines: { color: '#22262B' } },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#22262B' },
+    rightPriceScale: { borderColor: '#22262B' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#3FA796', downColor: '#B8483C',
+    borderUpColor: '#3FA796', borderDownColor: '#B8483C',
+    wickUpColor: '#3FA796', wickDownColor: '#B8483C',
+  });
+  chartInitialized = true;
+}
+
+async function loadCandleHistory() {
+  const resp = await fetch('/api/candles');
+  const data = await resp.json();
+  if (data.candles && data.candles.length > 0) {
+    if (!chartInitialized) initChart();
+    const formatted = data.candles.map(c => ({
+      time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close,
+    }));
+    candleSeries.setData(formatted);
+    lastClose = formatted[formatted.length - 1].close;
+    chart.timeScale().fitContent();
+  }
+}
+
+function updateLastCandle(snap) {
+  if (!chartInitialized || !candleSeries) return;
+  // append/update the most recent bar using the latest snapshot price —
+  // gives a live "ticking" feel between full candle refreshes
+  if (snap.ts && snap.ltp) {
+    candleSeries.update({ time: snap.ts, open: lastClose || snap.ltp, high: snap.ltp,
+                            low: snap.ltp, close: snap.ltp });
+  }
+}
+
 async function refresh() {
   try {
     const snapResp = await fetch('/api/snapshot');
     const snap = await snapResp.json();
+
+    const prevPrice = lastClose;
     document.getElementById('ltp').textContent = '₹' + fmt(snap.ltp);
+    if (prevPrice !== null && snap.ltp) {
+      const diff = snap.ltp - prevPrice;
+      const el = document.getElementById('change');
+      el.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2);
+      el.className = 'mono change ' + (diff >= 0 ? 'bull' : 'bear');
+    }
+
     document.getElementById('regime').textContent = snap.regime_trend;
     document.getElementById('event').textContent = snap.last_structure_event;
     document.getElementById('hasPos').textContent = snap.has_open_position ? 'YES' : 'NO';
@@ -297,13 +410,13 @@ async function refresh() {
     if (snap.open_position) {
       const p = snap.open_position;
       document.getElementById('posDetails').innerHTML =
-        `<div class="row"><span>Direction</span><span class="mono ${p.direction==='LONG'?'bull':'bear'}">${p.direction}</span></div>
-         <div class="row"><span>Entry</span><span class="mono">₹${fmt(p.entry_price)}</span></div>
-         <div class="row"><span>Current Stop</span><span class="mono">₹${fmt(p.current_stop)}</span></div>
-         <div class="row"><span>State</span><span class="mono">${p.state}</span></div>
-         <div class="row"><span>Qty Remaining</span><span class="mono">${p.quantity_remaining_pct}%</span></div>`;
+        '<div class="row"><span>Direction</span><span class="mono ' + (p.direction==='LONG'?'bull':'bear') + '">' + p.direction + '</span></div>' +
+        '<div class="row"><span>Entry</span><span class="mono">₹' + fmt(p.entry_price) + '</span></div>' +
+        '<div class="row"><span>Current Stop</span><span class="mono">₹' + fmt(p.current_stop) + '</span></div>' +
+        '<div class="row"><span>State</span><span class="mono">' + p.state + '</span></div>' +
+        '<div class="row"><span>Qty Remaining</span><span class="mono">' + p.quantity_remaining_pct + '%</span></div>';
     } else {
-      document.getElementById('posDetails').textContent = 'No open position';
+      document.getElementById('posDetails').innerHTML = '<div class="empty-note">No open position</div>';
     }
 
     const perfResp = await fetch('/api/performance');
@@ -317,7 +430,7 @@ async function refresh() {
       badge.textContent = 'LIVE — Angel One';
       badge.className = 'badge live';
     } else {
-      badge.textContent = 'SIMULATED DATA';
+      badge.textContent = 'Simulated data';
       badge.className = 'badge sim';
     }
 
@@ -325,13 +438,17 @@ async function refresh() {
     const tradesData = await tradesResp.json();
     const trades = tradesData.trades.slice(-10).reverse();
     if (trades.length === 0) {
-      document.getElementById('tradesList').textContent = 'No trades yet this session.';
+      document.getElementById('tradesList').innerHTML = '<div class="empty-note">No trades yet this session.</div>';
     } else {
       document.getElementById('tradesList').innerHTML = trades.map(t =>
-        `<div class="row"><span>${t.direction} @ ₹${fmt(t.entry_price)} → ₹${fmt(t.exit_price)}</span>
-         <span class="mono ${t.r_multiple>=0?'bull':'bear'}">${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R (${t.exit_reason})</span></div>`
+        '<div class="row"><span>' + t.direction + ' @ ₹' + fmt(t.entry_price) + ' → ₹' + fmt(t.exit_price) + '</span>' +
+        '<span class="mono ' + (t.r_multiple>=0?'bull':'bear') + '">' + (t.r_multiple>=0?'+':'') + t.r_multiple.toFixed(2) + 'R (' + t.exit_reason + ')</span></div>'
       ).join('');
     }
+
+    // refresh full candle history periodically (cheap, keeps chart in sync
+    // if the tab was backgrounded or a candle history reset occurred)
+    await loadCandleHistory();
 
     document.getElementById('status').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -340,7 +457,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 5000);  // refresh every 5 seconds
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>
