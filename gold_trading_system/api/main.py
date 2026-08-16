@@ -15,6 +15,7 @@ import asyncio
 import random
 import time
 import threading
+from datetime import datetime, timezone, timedelta
 
 from config.settings import Settings
 from execution.broker_adapters.paper_provider import PaperBrokerProvider
@@ -62,6 +63,23 @@ def start_feed():
               "Place a filled-in angel_one_feed.py in this folder for real live trading.")
 
 
+def _get_market_session_status() -> dict:
+    """
+    MCX gold trading session: ~9:00 AM to 11:30/11:55 PM IST, Mon-Fri.
+    This is informational for the dashboard (session badge, countdown) —
+    it does NOT gate trading logic, which is the risk engine's job.
+    """
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))  # IST
+    is_weekday = now.weekday() < 5
+    session_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    session_end = now.replace(hour=23, minute=30, second=0, microsecond=0)
+    is_open = is_weekday and session_start <= now <= session_end
+
+    if is_open:
+        return {"status": "OPEN", "label": "Market Open", "local_time": now.strftime("%H:%M:%S IST")}
+    return {"status": "CLOSED", "label": "Market Closed", "local_time": now.strftime("%H:%M:%S IST")}
+
+
 class HealthResponse(BaseModel):
     status: str
     mode: str
@@ -79,6 +97,9 @@ class SnapshotResponse(BaseModel):
     trading_disabled: bool
     trades_taken_today: int
     total_trades_this_session: int
+    session_status: str
+    session_label: str
+    local_time: str
 
 
 class SignalResponse(BaseModel):
@@ -155,6 +176,7 @@ def _get_or_advance_snapshot() -> dict:
 @app.get("/api/snapshot", response_model=SnapshotResponse)
 def get_snapshot():
     snap = _get_or_advance_snapshot()
+    session = _get_market_session_status()
     return SnapshotResponse(
         instrument=settings.instrument.symbol, ltp=round(snap["ltp"], 2),
         regime_trend=snap["regime_trend"], last_structure_event=snap["last_structure_event"],
@@ -162,6 +184,8 @@ def get_snapshot():
         trading_disabled=snap["risk_state"]["trading_disabled"],
         trades_taken_today=snap["risk_state"]["trades_taken_today"],
         total_trades_this_session=snap["total_trades_this_session"],
+        session_status=session["status"], session_label=session["label"],
+        local_time=session["local_time"],
     )
 
 
@@ -237,128 +261,286 @@ _DASHBOARD_HTML = """
 <title>GOLDM — Live Paper Trading</title>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&%23129395;</text></svg>">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
-    --bg: #0B0D0F; --panel: #14171A; --panel-border: #22262B;
-    --gold: #C9A227; --gold-dim: #8A7220;
-    --bull: #3FA796; --bear: #B8483C;
-    --text: #E7E9EC; --text-dim: #8A93A3; --text-faint: #565D69;
+    --bg: #08090B; --bg-alt: #0C0E11;
+    --panel: #13161A; --panel-2: #171B20; --panel-border: #24282F;
+    --gold: #C9A227; --gold-soft: #E0BE4F; --gold-dim: #6B5A18;
+    --bull: #3FA796; --bull-soft: rgba(63,167,150,0.14);
+    --bear: #C24F42; --bear-soft: rgba(194,79,66,0.14);
+    --text: #EDEFF2; --text-dim: #9198A3; --text-faint: #565C68;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Courier New', monospace;
+    --sans: 'Inter', -apple-system, 'Segoe UI', sans-serif;
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
-    background: var(--bg); color: var(--text); margin: 0; padding: 20px;
-    font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+    background:
+      radial-gradient(ellipse 1200px 600px at 50% -10%, rgba(201,162,39,0.05), transparent),
+      var(--bg);
+    color: var(--text); margin: 0; padding: 0; font-family: var(--sans);
+    min-height: 100vh;
   }
-  .mono { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+  ::selection { background: rgba(201,162,39,0.25); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 18px 22px 40px; }
+
+  /* ---------- header ---------- */
   header {
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding-bottom: 14px; margin-bottom: 16px; border-bottom: 1px solid var(--panel-border);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 14px 0 18px; margin-bottom: 18px; border-bottom: 1px solid var(--panel-border);
   }
-  .symbol { color: var(--gold); font-weight: 700; font-size: 20px; letter-spacing: 0.02em; }
-  .price { font-size: 26px; font-weight: 700; }
-  .change { font-size: 13px; }
-  .badge {
-    padding: 3px 9px; border-radius: 4px; font-size: 11px;
-    text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--gold-soft), var(--gold-dim));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 13px; color: #0B0D0F; font-family: var(--mono);
   }
-  .badge.live { background: rgba(63,167,150,0.14); color: var(--bull); border: 1px solid rgba(63,167,150,0.35); }
-  .badge.sim { background: rgba(201,162,39,0.14); color: var(--gold); border: 1px solid rgba(201,162,39,0.35); }
-  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--bull); animation: pulse 2s infinite; margin-left: auto; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .brand-text .symbol { color: var(--gold-soft); font-weight: 700; font-size: 17px; letter-spacing: 0.02em; line-height: 1.1; }
+  .brand-text .sub { color: var(--text-faint); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
 
-  #chart-container { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
-  #chart { height: 380px; }
+  .price-block { display: flex; align-items: baseline; gap: 10px; margin-left: 6px; }
+  .price { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
+  .change { font-size: 13px; font-weight: 600; padding: 2px 7px; border-radius: 5px; }
+  .change.bull { color: var(--bull); background: var(--bull-soft); }
+  .change.bear { color: var(--bear); background: var(--bear-soft); }
+  .change.flat { color: var(--text-faint); }
+
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pill {
+    display: flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    border: 1px solid var(--panel-border); background: var(--panel);
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .pill.session-open .dot { background: var(--bull); box-shadow: 0 0 8px var(--bull); animation: blink 2s infinite; }
+  .pill.session-closed .dot { background: var(--text-faint); }
+  .pill.session-open { color: var(--bull); border-color: rgba(63,167,150,0.3); }
+  .pill.feed-live { color: var(--bull); border-color: rgba(63,167,150,0.3); }
+  .pill.feed-live .dot { background: var(--bull); animation: blink 1.4s infinite; }
+  .pill.feed-sim { color: var(--gold); border-color: rgba(201,162,39,0.3); }
+  .pill.feed-sim .dot { background: var(--gold); }
+  .clock { color: var(--text-dim); font-size: 12px; }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.25; } }
+
+  /* ---------- layout ---------- */
+  .layout { display: grid; grid-template-columns: 2.1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+    overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--panel-border);
+  }
+  .panel-head h3 {
+    margin: 0; font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--text-faint); font-weight: 700; display: flex; align-items: center; gap: 7px;
+  }
+  .panel-head h3::before { content: ''; width: 3px; height: 12px; background: var(--gold-dim); border-radius: 2px; }
+  .panel-body { padding: 16px; }
+
+  #chart { height: 340px; }
+  #volume { height: 70px; margin-top: 2px; }
   .chart-empty {
-    height: 380px; display: flex; align-items: center; justify-content: center;
-    color: var(--text-faint); font-size: 13px; text-align: center; flex-direction: column; gap: 8px;
+    height: 410px; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); font-size: 13px; text-align: center; flex-direction: column; gap: 10px;
   }
+  .chart-empty .icon { font-size: 22px; opacity: 0.4; }
 
-  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-  .card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 8px; padding: 16px; }
-  .card h3 {
-    margin: 0 0 12px 0; font-size: 11px; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--text-faint); font-weight: 600;
-  }
+  .stack { display: flex; flex-direction: column; gap: 14px; }
   .row {
-    display: flex; justify-content: space-between; padding: 7px 0;
-    border-bottom: 1px solid var(--panel-border); font-size: 13.5px;
+    display: flex; justify-content: space-between; align-items: center; padding: 8px 0;
+    border-bottom: 1px solid var(--panel-border); font-size: 13px;
   }
   .row:last-child { border-bottom: none; }
-  .row span:first-child { color: var(--text-dim); }
-  .bull { color: var(--bull); } .bear { color: var(--bear); } .gold { color: var(--gold); }
-  .empty-note { color: var(--text-faint); font-size: 13px; }
+  .row .k { color: var(--text-dim); }
+  .row .v { font-weight: 600; }
+  .bull { color: var(--bull); } .bear { color: var(--bear); } .gold { color: var(--gold-soft); }
+  .empty-note { color: var(--text-faint); font-size: 12.5px; padding: 8px 0; }
 
-  #status { font-size: 11px; color: var(--text-faint); margin-top: 14px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat {
+    background: var(--panel-2); border: 1px solid var(--panel-border); border-radius: 8px;
+    padding: 11px 12px;
+  }
+  .stat .label { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .stat .value { font-size: 17px; font-weight: 700; }
+
+  .trade-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid var(--panel-border); font-size: 13px;
+  }
+  .trade-item:last-child { border-bottom: none; }
+  .trade-badge {
+    font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.03em;
+  }
+  .trade-badge.long { background: var(--bull-soft); color: var(--bull); }
+  .trade-badge.short { background: var(--bear-soft); color: var(--bear); }
+  .trade-detail { flex: 1; color: var(--text-dim); }
+  .trade-r { font-weight: 700; }
+  .trade-reason { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+
+  footer {
+    margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--panel-border);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    font-size: 11px; color: var(--text-faint);
+  }
+  footer .dot-live { width: 6px; height: 6px; border-radius: 50%; background: var(--bull); display: inline-block; margin-right: 5px; animation: blink 2s infinite; }
 </style>
 </head>
 <body>
+<div class="wrap">
+
   <header>
-    <span class="symbol mono">GOLDM</span>
-    <span id="ltp" class="mono price">--</span>
-    <span id="change" class="mono change">--</span>
-    <span id="feedBadge" class="badge sim">Loading...</span>
-    <span class="pulse"></span>
+    <div class="brand">
+      <div class="brand-mark">Au</div>
+      <div class="brand-text">
+        <div class="symbol mono">GOLDM</div>
+        <div class="sub">MCX · Next-Month Futures</div>
+      </div>
+    </div>
+
+    <div class="price-block">
+      <span id="ltp" class="mono price">--</span>
+      <span id="change" class="mono change flat">--</span>
+    </div>
+
+    <div class="header-right">
+      <span id="clock" class="mono clock">--:--:--</span>
+      <span id="sessionPill" class="pill session-closed"><span class="dot"></span><span id="sessionLabel">--</span></span>
+      <span id="feedBadge" class="pill feed-sim"><span class="dot"></span>Loading</span>
+    </div>
   </header>
 
-  <div id="chart-container">
-    <div id="chartEmpty" class="chart-empty">
-      Waiting for the first candle — chart appears once real data starts flowing.
+  <div class="layout">
+    <!-- left column: chart -->
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Price Action · 5M</h3>
+        <span id="trendTag" class="mono" style="font-size:11px; color:var(--text-faint);">--</span>
+      </div>
+      <div class="panel-body" style="padding: 10px;">
+        <div id="chartEmpty" class="chart-empty">
+          <div class="icon">◇</div>
+          <div>Waiting for the first candle<br>Chart renders once real data starts flowing.</div>
+        </div>
+        <div id="chartWrap" style="display:none;">
+          <div id="chart"></div>
+          <div id="volume"></div>
+        </div>
+      </div>
     </div>
-    <div id="chart" style="display:none;"></div>
+
+    <!-- right column: stacked cards -->
+    <div class="stack">
+      <div class="panel">
+        <div class="panel-head"><h3>Situation</h3></div>
+        <div class="panel-body">
+          <div class="row"><span class="k">Trend</span><span id="regime" class="v mono">--</span></div>
+          <div class="row"><span class="k">Last Structure Event</span><span id="event" class="v mono">--</span></div>
+          <div class="row"><span class="k">Open Position</span><span id="hasPos" class="v mono">--</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Open Position</h3></div>
+        <div class="panel-body">
+          <div id="posDetails"><div class="empty-note">No open position</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Risk &amp; Performance</h3></div>
+        <div class="panel-body">
+          <div class="stat-grid">
+            <div class="stat">
+              <div class="label">Equity</div>
+              <div id="equity" class="value mono gold">--</div>
+            </div>
+            <div class="stat">
+              <div class="label">Trades Today</div>
+              <div id="tradesToday" class="value mono">--</div>
+            </div>
+            <div class="stat">
+              <div class="label">Session Total</div>
+              <div id="totalTrades" class="value mono">--</div>
+            </div>
+            <div class="stat">
+              <div class="label">Trading Disabled</div>
+              <div id="disabled" class="value mono">--</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div class="grid">
-    <div class="card">
-      <h3>Situation</h3>
-      <div class="row"><span>Trend</span><span id="regime" class="mono">--</span></div>
-      <div class="row"><span>Last Event</span><span id="event" class="mono">--</span></div>
-      <div class="row"><span>Open Position</span><span id="hasPos" class="mono">--</span></div>
-    </div>
-    <div class="card">
-      <h3>Open Position</h3>
-      <div id="posDetails" class="empty-note">No open position</div>
-    </div>
-    <div class="card">
-      <h3>Risk State</h3>
-      <div class="row"><span>Trading Disabled</span><span id="disabled" class="mono">--</span></div>
-      <div class="row"><span>Trades Today</span><span id="tradesToday" class="mono">--</span></div>
-      <div class="row"><span>Total This Session</span><span id="totalTrades" class="mono">--</span></div>
-      <div class="row"><span>Equity</span><span id="equity" class="mono">--</span></div>
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head"><h3>Recent Trades</h3></div>
+    <div class="panel-body">
+      <div id="tradesList"><div class="empty-note">No trades yet this session.</div></div>
     </div>
   </div>
 
-  <div class="card" style="margin-top:14px;">
-    <h3>Recent Trades</h3>
-    <div id="tradesList" class="empty-note">No trades yet this session.</div>
-  </div>
+  <footer>
+    <span><span class="dot-live"></span>Auto-refresh: 5s</span>
+    <span id="status">Connecting...</span>
+  </footer>
 
-  <div id="status">Connecting...</div>
+</div>
 
 <script>
 function fmt(n) { return typeof n === 'number' ? n.toLocaleString('en-IN', {maximumFractionDigits:2}) : n; }
 
-let chart = null;
-let candleSeries = null;
-let lastClose = null;
-let chartInitialized = false;
+let chart = null, volumeChart = null, candleSeries = null, volumeSeries = null;
+let lastClose = null, chartInitialized = false;
+
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  document.getElementById('clock').textContent = ist.toLocaleTimeString('en-IN', { hour12: false }) + ' IST';
+}
+tickClock();
+setInterval(tickClock, 1000);
 
 function initChart() {
   document.getElementById('chartEmpty').style.display = 'none';
-  document.getElementById('chart').style.display = 'block';
+  document.getElementById('chartWrap').style.display = 'block';
+
   chart = LightweightCharts.createChart(document.getElementById('chart'), {
-    height: 380,
-    layout: { background: { color: '#14171A' }, textColor: '#8A93A3' },
-    grid: { vertLines: { color: '#22262B' }, horzLines: { color: '#22262B' } },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#22262B' },
-    rightPriceScale: { borderColor: '#22262B' },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    height: 340,
+    layout: { background: { color: 'transparent' }, textColor: '#9198A3', fontFamily: 'JetBrains Mono, monospace' },
+    grid: { vertLines: { color: '#1C2026' }, horzLines: { color: '#1C2026' } },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#24282F' },
+    rightPriceScale: { borderColor: '#24282F' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color: '#C9A227', width: 1, style: 2 }, horzLine: { color: '#C9A227', width: 1, style: 2 } },
   });
   candleSeries = chart.addCandlestickSeries({
-    upColor: '#3FA796', downColor: '#B8483C',
-    borderUpColor: '#3FA796', borderDownColor: '#B8483C',
-    wickUpColor: '#3FA796', wickDownColor: '#B8483C',
+    upColor: '#3FA796', downColor: '#C24F42',
+    borderUpColor: '#3FA796', borderDownColor: '#C24F42',
+    wickUpColor: '#3FA796', wickDownColor: '#C24F42',
   });
+
+  volumeChart = LightweightCharts.createChart(document.getElementById('volume'), {
+    height: 70,
+    layout: { background: { color: 'transparent' }, textColor: '#565C68', fontFamily: 'JetBrains Mono, monospace' },
+    grid: { vertLines: { color: 'transparent' }, horzLines: { color: 'transparent' } },
+    timeScale: { visible: false },
+    rightPriceScale: { borderColor: '#24282F' },
+  });
+  volumeSeries = volumeChart.addHistogramSeries({ color: '#3FA796', priceFormat: { type: 'volume' } });
+
+  chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range) volumeChart.timeScale().setVisibleLogicalRange(range);
+  });
+
   chartInitialized = true;
 }
 
@@ -367,22 +549,16 @@ async function loadCandleHistory() {
   const data = await resp.json();
   if (data.candles && data.candles.length > 0) {
     if (!chartInitialized) initChart();
-    const formatted = data.candles.map(c => ({
-      time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close,
+    const candles = data.candles.map(c => ({ time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close }));
+    const vols = data.candles.map(c => ({
+      time: c.ts, value: c.volume,
+      color: c.close >= c.open ? 'rgba(63,167,150,0.55)' : 'rgba(194,79,66,0.55)',
     }));
-    candleSeries.setData(formatted);
-    lastClose = formatted[formatted.length - 1].close;
+    candleSeries.setData(candles);
+    volumeSeries.setData(vols);
+    lastClose = candles[candles.length - 1].close;
     chart.timeScale().fitContent();
-  }
-}
-
-function updateLastCandle(snap) {
-  if (!chartInitialized || !candleSeries) return;
-  // append/update the most recent bar using the latest snapshot price —
-  // gives a live "ticking" feel between full candle refreshes
-  if (snap.ts && snap.ltp) {
-    candleSeries.update({ time: snap.ts, open: lastClose || snap.ltp, high: snap.ltp,
-                            low: snap.ltp, close: snap.ltp });
+    volumeChart.timeScale().fitContent();
   }
 }
 
@@ -392,29 +568,36 @@ async function refresh() {
     const snap = await snapResp.json();
 
     const prevPrice = lastClose;
-    document.getElementById('ltp').textContent = '₹' + fmt(snap.ltp);
+    document.getElementById('ltp').textContent = snap.ltp ? '₹' + fmt(snap.ltp) : '--';
+    const changeEl = document.getElementById('change');
     if (prevPrice !== null && snap.ltp) {
       const diff = snap.ltp - prevPrice;
-      const el = document.getElementById('change');
-      el.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2);
-      el.className = 'mono change ' + (diff >= 0 ? 'bull' : 'bear');
+      changeEl.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2);
+      changeEl.className = 'mono change ' + (diff > 0 ? 'bull' : diff < 0 ? 'bear' : 'flat');
     }
 
     document.getElementById('regime').textContent = snap.regime_trend;
+    document.getElementById('trendTag').textContent = snap.regime_trend + ' · ' + snap.last_structure_event;
     document.getElementById('event').textContent = snap.last_structure_event;
     document.getElementById('hasPos').textContent = snap.has_open_position ? 'YES' : 'NO';
-    document.getElementById('disabled').textContent = snap.trading_disabled ? 'YES ⚠️' : 'No';
+    document.getElementById('disabled').innerHTML = snap.trading_disabled
+      ? '<span class="bear">YES ⚠️</span>' : '<span class="bull">No</span>';
     document.getElementById('tradesToday').textContent = snap.trades_taken_today;
     document.getElementById('totalTrades').textContent = snap.total_trades_this_session;
+
+    const sessionPill = document.getElementById('sessionPill');
+    const sessionLabel = document.getElementById('sessionLabel');
+    sessionLabel.textContent = snap.session_label + ' · ' + snap.local_time;
+    sessionPill.className = 'pill ' + (snap.session_status === 'OPEN' ? 'session-open' : 'session-closed');
 
     if (snap.open_position) {
       const p = snap.open_position;
       document.getElementById('posDetails').innerHTML =
-        '<div class="row"><span>Direction</span><span class="mono ' + (p.direction==='LONG'?'bull':'bear') + '">' + p.direction + '</span></div>' +
-        '<div class="row"><span>Entry</span><span class="mono">₹' + fmt(p.entry_price) + '</span></div>' +
-        '<div class="row"><span>Current Stop</span><span class="mono">₹' + fmt(p.current_stop) + '</span></div>' +
-        '<div class="row"><span>State</span><span class="mono">' + p.state + '</span></div>' +
-        '<div class="row"><span>Qty Remaining</span><span class="mono">' + p.quantity_remaining_pct + '%</span></div>';
+        '<div class="row"><span class="k">Direction</span><span class="v mono ' + (p.direction==='LONG'?'bull':'bear') + '">' + p.direction + '</span></div>' +
+        '<div class="row"><span class="k">Entry</span><span class="v mono">₹' + fmt(p.entry_price) + '</span></div>' +
+        '<div class="row"><span class="k">Current Stop</span><span class="v mono">₹' + fmt(p.current_stop) + '</span></div>' +
+        '<div class="row"><span class="k">State</span><span class="v mono">' + p.state + '</span></div>' +
+        '<div class="row"><span class="k">Qty Remaining</span><span class="v mono">' + p.quantity_remaining_pct + '%</span></div>';
     } else {
       document.getElementById('posDetails').innerHTML = '<div class="empty-note">No open position</div>';
     }
@@ -427,11 +610,11 @@ async function refresh() {
     const health = await healthResp.json();
     const badge = document.getElementById('feedBadge');
     if (health.data_feed === 'ANGEL_ONE_LIVE') {
-      badge.textContent = 'LIVE — Angel One';
-      badge.className = 'badge live';
+      badge.innerHTML = '<span class="dot"></span>Live — Angel One';
+      badge.className = 'pill feed-live';
     } else {
-      badge.textContent = 'Simulated data';
-      badge.className = 'badge sim';
+      badge.innerHTML = '<span class="dot"></span>Simulated';
+      badge.className = 'pill feed-sim';
     }
 
     const tradesResp = await fetch('/api/trades');
@@ -440,17 +623,19 @@ async function refresh() {
     if (trades.length === 0) {
       document.getElementById('tradesList').innerHTML = '<div class="empty-note">No trades yet this session.</div>';
     } else {
-      document.getElementById('tradesList').innerHTML = trades.map(t =>
-        '<div class="row"><span>' + t.direction + ' @ ₹' + fmt(t.entry_price) + ' → ₹' + fmt(t.exit_price) + '</span>' +
-        '<span class="mono ' + (t.r_multiple>=0?'bull':'bear') + '">' + (t.r_multiple>=0?'+':'') + t.r_multiple.toFixed(2) + 'R (' + t.exit_reason + ')</span></div>'
+      document.getElementById('tradesList').innerHTML = trades.map(t => `
+        <div class="trade-item">
+          <span class="trade-badge ${t.direction==='LONG'?'long':'short'}">${t.direction}</span>
+          <span class="trade-detail mono">₹${fmt(t.entry_price)} → ₹${fmt(t.exit_price)}</span>
+          <span class="trade-reason">${t.exit_reason}</span>
+          <span class="trade-r mono ${t.r_multiple>=0?'bull':'bear'}">${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R</span>
+        </div>`
       ).join('');
     }
 
-    // refresh full candle history periodically (cheap, keeps chart in sync
-    // if the tab was backgrounded or a candle history reset occurred)
     await loadCandleHistory();
 
-    document.getElementById('status').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+    document.getElementById('status').textContent = 'Last updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('status').textContent = 'Connection error: ' + e;
   }
