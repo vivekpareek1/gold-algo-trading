@@ -15,6 +15,7 @@ import asyncio
 import random
 import time
 import threading
+import os
 from datetime import datetime, timezone, timedelta
 
 from config.settings import Settings
@@ -34,7 +35,14 @@ app.add_middleware(
 settings = Settings()
 broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
 broker.connect()
-live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM")
+# Persistence path is configurable so test imports of this module (which
+# instantiate this SAME global live_engine at import time) never write to
+# the real trade history file — see tests/test_api.py, which sets this env
+# var to a throwaway temp path before importing. An empty string disables
+# persistence entirely (used by tests that want zero disk side effects).
+_persistence_env = os.environ.get("TRADE_HISTORY_PATH", "trade_history.jsonl")
+_persistence_path = _persistence_env if _persistence_env else None
+live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=_persistence_path)
 
 _last_price = 63000.0
 _tick_count = 0

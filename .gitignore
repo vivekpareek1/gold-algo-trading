@@ -7,3 +7,4 @@ angel_one_feed.py
 *.db
 *.sqlite3
 *.csv
+*.jsonl

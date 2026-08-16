@@ -12,6 +12,8 @@ intrabar stop checks, blended R on partials, daily counter resets,
 cooldown-based resume after a disable, and real position tracking.
 """
 import time
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -128,7 +130,8 @@ class LiveTradingEngine:
     """
 
     def __init__(self, config, broker: BrokerProvider, symbol: str = "GOLDM",
-                 htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1):
+                 htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1,
+                 persistence_path: str | None = "trade_history.jsonl"):
         self.config = config
         self.broker = broker
         self.symbol = symbol
@@ -141,6 +144,16 @@ class LiveTradingEngine:
         self.htf_lookup_fn = htf_timeframe_lookup
         self.htf_aggregator = _LiveHTFAggregator(htf_minutes=60) if htf_timeframe_lookup is None else None
 
+        # Persistence: without this, a service restart (crash, redeploy,
+        # server reboot) silently wiped the entire in-memory trade history —
+        # not a financial risk in paper mode, but a data-completeness one:
+        # the whole point of a multi-week live paper run is the trade
+        # record, and losing it mid-run would corrupt the very analysis this
+        # was built for. Appends one JSON line per closed trade; loaded back
+        # on startup so history survives restarts. None disables persistence
+        # entirely (used by tests, which should not touch disk).
+        self.persistence_path = Path(persistence_path) if persistence_path else None
+
         self.structure = MarketStructureEngine()
         self.indicators = IndicatorEngine()
         self.situation_analyzer = SituationAnalyzer(config)
@@ -150,6 +163,48 @@ class LiveTradingEngine:
         self.target_engine = TargetEngine(config)
 
         self.state = LiveEngineState()
+        self._load_persisted_trades()
+
+    def _load_persisted_trades(self):
+        """
+        Load any trade history from a previous run. Resilient per-line: a
+        real crash mid-write typically corrupts only the LAST line (the
+        write in progress when the process died), not earlier ones —
+        aborting on the first bad line would discard an entire session's
+        valid history over one truncated write at the end.
+        """
+        if self.persistence_path is None or not self.persistence_path.exists():
+            return
+        loaded, skipped = 0, 0
+        try:
+            with open(self.persistence_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self.state.trade_log.append(json.loads(line))
+                        loaded += 1
+                    except json.JSONDecodeError:
+                        skipped += 1
+        except OSError as e:
+            print(f"Warning: could not read persisted trade history "
+                  f"({type(e).__name__}: {e}) — starting with empty history.")
+            return
+        if skipped:
+            print(f"Loaded {loaded} persisted trades, skipped {skipped} corrupted line(s).")
+
+    def _persist_trade(self, trade: dict):
+        """Append one closed trade to disk. A write failure must not crash
+        the trading loop — losing one persisted record is far better than
+        losing the ability to trade."""
+        if self.persistence_path is None:
+            return
+        try:
+            with open(self.persistence_path, "a") as f:
+                f.write(json.dumps(trade) + "\n")
+        except OSError as e:
+            print(f"Warning: could not persist trade to disk: {type(e).__name__}: {e}")
 
     def seconds_since_last_tick(self) -> float | None:
         """Wall-clock seconds since a tick last arrived, or None if none ever
@@ -257,14 +312,16 @@ class LiveTradingEngine:
             if self.risk_engine.state.trading_disabled and self.state.disabled_since_day is None:
                 self.state.disabled_since_day = self.state.current_day
 
-            self.state.trade_log.append({
+            closed_trade = {
                 "entry_price": tm.state.entry_price, "exit_price": exit_price,
                 "direction": tm.state.direction, "r_multiple": r,
                 "exit_reason": tm.state.exit_reason.value, "ts": tick.ts,
                 "entry_regime": self.state.open_trade_entry_regime,
-            })
+            }
+            self.state.trade_log.append(closed_trade)
+            self._persist_trade(closed_trade)
             # bounded like signal_log — a long-running live session must not
-            # grow memory without limit. Persist to the DB layer for full history.
+            # grow memory without limit. Full history lives in persistence_path.
             self.state.trade_log = self.state.trade_log[-1000:]
             self.risk_engine.register_position_closed()
             self.state.open_trade_manager = None

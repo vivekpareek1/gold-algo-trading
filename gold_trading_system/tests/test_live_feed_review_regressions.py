@@ -18,7 +18,7 @@ from tests.test_backtest_runner import make_synthetic_trending_candles
 def _engine():
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    return LiveTradingEngine(Settings(), broker, symbol="GOLDM"), broker
+    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None), broker
 
 
 # ---------- FINDING 1: a volume-less feed silently guts the strategy ----------
