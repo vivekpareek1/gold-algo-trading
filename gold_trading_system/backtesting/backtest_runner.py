@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from market_structure.structure_engine import (
     MarketStructureEngine, Candle as StructCandle, TrendState, StructureState
 )
-from indicators.incremental import IndicatorEngine
+from indicators.incremental import IndicatorEngine, momentum_health_from_indicator_result
 from situation_analysis.situation_analyzer import SituationAnalyzer, IndicatorSnapshot, MacroContext
 from signal_engine.signal_engine import SignalEngine, ConfluenceInputs, Decision
 from risk_engine.risk_engine import RiskEngine, DailyRiskState
@@ -186,7 +186,7 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
 
         # ---- manage an already-open trade first ----
         if open_trade_manager is not None:
-            momentum_health = _momentum_from_indicators(ind_result)
+            momentum_health = momentum_health_from_indicator_result(ind_result)
             structure_broke = struct_state.last_event.value.startswith("CHOCH") and (
                 (open_trade_manager.state.direction == "LONG" and "BEARISH" in struct_state.last_event.value) or
                 (open_trade_manager.state.direction == "SHORT" and "BULLISH" in struct_state.last_event.value)
@@ -328,13 +328,6 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
 
     metrics = compute_metrics(r_multiples)
     return BacktestResult(metrics=metrics, trade_log=trade_log, signal_log=signal_log)
-
-
-def _momentum_from_indicators(ind_result: dict) -> str:
-    macd_accel = abs(ind_result["macd_hist"]) > abs(ind_result["macd_hist_prev"])
-    volume_ok = ind_result["rel_volume"] >= 1.0
-    score = sum([macd_accel, volume_ok])
-    return "STRONG" if score == 2 else ("WEAKENING" if score == 1 else "DEAD")
 
 
 def _neutral_fair_value(price: float):

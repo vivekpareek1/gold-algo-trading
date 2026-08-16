@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from market_structure.structure_engine import (
     MarketStructureEngine, Candle as StructCandle, TrendState, StructureState
 )
-from indicators.incremental import IndicatorEngine
+from indicators.incremental import IndicatorEngine, momentum_health_from_indicator_result
 from situation_analysis.situation_analyzer import SituationAnalyzer, IndicatorSnapshot, MacroContext
 from signal_engine.signal_engine import SignalEngine, ConfluenceInputs, Decision
 from risk_engine.risk_engine import RiskEngine, DailyRiskState
@@ -291,7 +291,7 @@ class LiveTradingEngine:
     # ---------- managing an open position ----------
     def _manage_open_trade(self, tick: LiveTick, ind_result: dict, struct_state):
         tm = self.state.open_trade_manager
-        momentum_health = self._momentum_from_indicators(ind_result)
+        momentum_health = momentum_health_from_indicator_result(ind_result)
         structure_broke = struct_state.last_event.value.startswith("CHOCH") and (
             (tm.state.direction == "LONG" and "BEARISH" in struct_state.last_event.value) or
             (tm.state.direction == "SHORT" and "BULLISH" in struct_state.last_event.value)
@@ -417,12 +417,6 @@ class LiveTradingEngine:
         self.state.open_trade_manager = TradeManager(self.config, tm_state)
         self.state.open_trade_entry_regime = situation.regime.value
         self.risk_engine.register_position_opened()
-
-    def _momentum_from_indicators(self, ind_result: dict) -> str:
-        macd_accel = abs(ind_result["macd_hist"]) > abs(ind_result["macd_hist_prev"])
-        volume_ok = ind_result["rel_volume"] >= 1.0
-        score = sum([macd_accel, volume_ok])
-        return "STRONG" if score == 2 else ("WEAKENING" if score == 1 else "DEAD")
 
     def _build_snapshot(self, tick: LiveTick, struct_state, ind_result: dict) -> dict:
         tm = self.state.open_trade_manager
