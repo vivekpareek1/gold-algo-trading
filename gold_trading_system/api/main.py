@@ -89,6 +89,11 @@ class HealthResponse(BaseModel):
     # of subscribing in a mode that carries none. Surfaced here so the
     # dashboard can show it; a silent detector nobody reads is no safety net.
     volume_feed_broken: bool = False
+    # Seconds since a tick last ARRIVED (wall clock), and whether that is
+    # long enough to consider the feed dead rather than the market quiet.
+    # Without this a dropped socket looked identical to a calm session.
+    seconds_since_last_tick: float | None = None
+    feed_stale: bool = False
 
 
 class SnapshotResponse(BaseModel):
@@ -148,15 +153,34 @@ def _simulate_next_tick() -> LiveTick:
                       low=min(low, _last_price, close), close=close, volume=max(volume, 1))
 
 
+# A live feed that has gone quiet for longer than this during an open
+# session is treated as dead, not merely idle. GOLDM trades often enough
+# that multiple minutes of true silence is not a normal market state.
+FEED_STALE_AFTER_SEC = 180
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     volume_broken = False
     if _angel_feed is not None and getattr(_angel_feed, "aggregator", None) is not None:
         volume_broken = _angel_feed.aggregator.volume_feed_looks_broken
+
+    since = live_engine.seconds_since_last_tick() if LIVE_FEED_ACTIVE else None
+    session = _get_market_session_status()
+    # Only meaningful while the market is actually open — silence overnight
+    # or at the weekend is expected, not a fault.
+    stale = bool(
+        LIVE_FEED_ACTIVE
+        and session["status"] == "OPEN"
+        and (since is None or since > FEED_STALE_AFTER_SEC)
+    )
+
     return HealthResponse(
         status="ok", mode=settings.mode, broker_connected=LIVE_FEED_ACTIVE,
         data_feed="ANGEL_ONE_LIVE" if LIVE_FEED_ACTIVE else "PAPER_SIMULATED",
         volume_feed_broken=volume_broken,
+        seconds_since_last_tick=round(since, 1) if since is not None else None,
+        feed_stale=stale,
     )
 
 
@@ -435,6 +459,10 @@ _DASHBOARD_HTML = """
     </div>
   </header>
 
+  <div id="staleWarning" style="display:none; background:rgba(194,79,66,0.16); border:1px solid rgba(194,79,66,0.5); color:var(--bear); padding:11px 14px; border-radius:8px; margin-bottom:14px; font-size:12.5px; font-weight:700;">
+    ⛔ FEED STALE — no ticks received recently while the market is open. Trading has effectively stopped. Check the feed process and network.
+  </div>
+
   <div id="volumeWarning" style="display:none; background:rgba(194,79,66,0.12); border:1px solid rgba(194,79,66,0.4); color:var(--bear); padding:11px 14px; border-radius:8px; margin-bottom:14px; font-size:12.5px; font-weight:600;">
     ⚠ Feed is delivering no volume. Volume-confirmation checks are meaningless in this state and the strategy will not behave like its backtest. Check the WebSocket subscription mode (needs Quote mode, not LTP).
   </div>
@@ -630,14 +658,21 @@ async function refresh() {
     const healthResp = await fetch('/health');
     const health = await healthResp.json();
     const badge = document.getElementById('feedBadge');
-    if (health.data_feed === 'ANGEL_ONE_LIVE') {
-      badge.innerHTML = '<span class="dot"></span>Live — Angel One';
+    if (health.data_feed === 'ANGEL_ONE_LIVE' && health.feed_stale) {
+      // never show a reassuring green LIVE badge over a dead feed
+      badge.innerHTML = '<span class="dot"></span>Feed stale';
+      badge.className = 'pill feed-sim';
+    } else if (health.data_feed === 'ANGEL_ONE_LIVE') {
+      const age = health.seconds_since_last_tick;
+      badge.innerHTML = '<span class="dot"></span>Live — Angel One' +
+        (age !== null && age !== undefined ? ' · ' + Math.round(age) + 's' : '');
       badge.className = 'pill feed-live';
     } else {
       badge.innerHTML = '<span class="dot"></span>Simulated';
       badge.className = 'pill feed-sim';
     }
     document.getElementById('volumeWarning').style.display = health.volume_feed_broken ? 'block' : 'none';
+    document.getElementById('staleWarning').style.display = health.feed_stale ? 'block' : 'none';
 
     const tradesResp = await fetch('/api/trades');
     const tradesData = await tradesResp.json();

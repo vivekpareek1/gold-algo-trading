@@ -11,6 +11,7 @@ Every bug fix from the backtest validation applies here identically:
 intrabar stop checks, blended R on partials, daily counter resets,
 cooldown-based resume after a disable, and real position tracking.
 """
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -103,6 +104,12 @@ class LiveEngineState:
     # price instead of one up to a whole bar stale.
     last_tick_price: float | None = None
     last_tick_ts: int | None = None
+    # Wall-clock time the last tick actually ARRIVED. Distinct from
+    # last_tick_ts (the exchange's own timestamp): if the feed dies, the
+    # exchange timestamp simply stops updating and looks indistinguishable
+    # from a quiet market. Comparing this against time.time() is what makes
+    # a dead feed detectable rather than silently frozen.
+    last_tick_received_at: float | None = None
     trade_log: list = field(default_factory=list)
     signal_log: list = field(default_factory=list)
     # bounded OHLCV history for chart display — not the full session (that
@@ -144,6 +151,13 @@ class LiveTradingEngine:
 
         self.state = LiveEngineState()
 
+    def seconds_since_last_tick(self) -> float | None:
+        """Wall-clock seconds since a tick last arrived, or None if none ever
+        has. Used to distinguish 'market is quiet' from 'the feed is dead'."""
+        if self.state.last_tick_received_at is None:
+            return None
+        return time.time() - self.state.last_tick_received_at
+
     def update_live_price(self, ltp: float, ts: int) -> None:
         """
         Record the latest traded price without running any strategy logic.
@@ -154,6 +168,7 @@ class LiveTradingEngine:
         """
         self.state.last_tick_price = ltp
         self.state.last_tick_ts = ts
+        self.state.last_tick_received_at = time.time()
 
     def on_tick(self, tick: LiveTick) -> dict:
         """

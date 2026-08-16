@@ -156,6 +156,93 @@ def test_dashboard_renders_the_volume_warning_element():
         "The dashboard must actually read the flag, not just define the banner"
 
 
+# ---------- FINDING 4: a dead feed looked identical to a quiet market ----------
+
+def test_seconds_since_last_tick_tracks_wall_clock():
+    import time as _time
+    engine, _ = _engine()
+    assert engine.seconds_since_last_tick() is None, \
+        "Before any tick arrives there is nothing to measure"
+
+    engine.update_live_price(ltp=63000.0, ts=1735689600)
+    elapsed = engine.seconds_since_last_tick()
+    assert elapsed is not None and elapsed < 1.0
+
+    _time.sleep(0.3)
+    assert engine.seconds_since_last_tick() > elapsed, \
+        "Staleness must grow with wall-clock time, not with exchange timestamps"
+
+
+def test_stale_detection_uses_arrival_time_not_exchange_timestamp():
+    """
+    The core of the bug: if the feed dies, the exchange timestamp simply
+    stops advancing, which is indistinguishable from a quiet market. Only
+    wall-clock arrival time reveals it.
+    """
+    engine, _ = _engine()
+    # an OLD exchange timestamp arriving right now is still a FRESH tick
+    engine.update_live_price(ltp=63000.0, ts=1600000000)
+    assert engine.seconds_since_last_tick() < 1.0, \
+        "Freshness must be judged by when the tick arrived, not what time it claims"
+
+
+def test_health_reports_stale_fields():
+    from fastapi.testclient import TestClient
+    from api.main import app
+    client = TestClient(app)
+    body = client.get("/health").json()
+    assert "feed_stale" in body
+    assert "seconds_since_last_tick" in body
+
+
+def test_feed_not_marked_stale_when_market_closed():
+    """Silence overnight or at the weekend is expected — it must not raise
+    a false alarm."""
+    import api.main as api_main
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    original = api_main.LIVE_FEED_ACTIVE
+    try:
+        api_main.LIVE_FEED_ACTIVE = True
+        with patch.object(api_main, "_get_market_session_status",
+                          return_value={"status": "CLOSED", "label": "Market Closed",
+                                         "local_time": "02:00:00 IST"}):
+            body = TestClient(api_main.app).get("/health").json()
+            assert body["feed_stale"] is False, \
+                "A quiet feed outside market hours is normal, not a fault"
+    finally:
+        api_main.LIVE_FEED_ACTIVE = original
+
+
+def test_feed_marked_stale_when_open_and_silent():
+    import api.main as api_main
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    original = api_main.LIVE_FEED_ACTIVE
+    try:
+        api_main.LIVE_FEED_ACTIVE = True
+        api_main.live_engine.state.last_tick_received_at = None  # nothing ever arrived
+        with patch.object(api_main, "_get_market_session_status",
+                          return_value={"status": "OPEN", "label": "Market Open",
+                                         "local_time": "10:00:00 IST"}):
+            body = TestClient(api_main.app).get("/health").json()
+            assert body["feed_stale"] is True, \
+                "An open market with no ticks arriving must be flagged, not shown as healthy"
+    finally:
+        api_main.LIVE_FEED_ACTIVE = original
+
+
+def test_dashboard_has_stale_banner_and_reads_the_flag():
+    from fastapi.testclient import TestClient
+    from api.main import app
+    html = TestClient(app).get("/").text
+    assert "staleWarning" in html
+    assert "feed_stale" in html, \
+        "The dashboard must actually consume the stale flag, not just define the banner"
+
+
 if __name__ == "__main__":
     tests = [
         test_zero_volume_feed_materially_changes_results,
@@ -167,6 +254,12 @@ if __name__ == "__main__":
         test_api_overlays_live_price_in_live_mode,
         test_health_endpoint_exposes_volume_feed_status,
         test_dashboard_renders_the_volume_warning_element,
+        test_seconds_since_last_tick_tracks_wall_clock,
+        test_stale_detection_uses_arrival_time_not_exchange_timestamp,
+        test_health_reports_stale_fields,
+        test_feed_not_marked_stale_when_market_closed,
+        test_feed_marked_stale_when_open_and_silent,
+        test_dashboard_has_stale_banner_and_reads_the_flag,
     ]
     failed = 0
     for t in tests:
@@ -181,3 +274,5 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
