@@ -37,6 +37,20 @@ class TickAggregator:
         self._o = self._h = self._l = self._c = None
         self._v = 0.0
         self._last_cumulative_volume: float | None = None
+        # Volume-sanity tracking. A feed subscribed in the wrong mode (Angel
+        # One's LTP mode 1 carries NO volume field at all) silently yields
+        # volume=0 forever, which turns every volume-confirmation check in
+        # the strategy into a no-op that always passes. On real 2-year MCX
+        # data that flipped results from +0.262R / PF 1.69 to -0.378R / PF
+        # 0.37 — so this must be loud, not silent.
+        self.ticks_seen = 0
+        self.nonzero_volume_ticks = 0
+
+    @property
+    def volume_feed_looks_broken(self) -> bool:
+        """True once enough ticks have arrived with zero volume throughout —
+        the signature of subscribing in a mode that carries no volume."""
+        return self.ticks_seen >= 50 and self.nonzero_volume_ticks == 0
 
     def _bucket_of(self, ts: int) -> int:
         span = self.interval_minutes * 60
@@ -51,6 +65,9 @@ class TickAggregator:
         system.
         """
         b = self._bucket_of(tick.ts)
+        self.ticks_seen += 1
+        if tick.volume:
+            self.nonzero_volume_ticks += 1
 
         if self._bucket_start is None:
             self._start_bucket(b, tick)

@@ -90,6 +90,40 @@ def test_never_emits_the_in_progress_bucket():
     assert all(r is None for r in results)
 
 
+
+def test_detects_a_feed_delivering_no_volume():
+    """
+    Regression test for a real, high-impact bug: angel_one_feed.py subscribed
+    with Angel One's LTP mode (1), whose payload carries NO volume field at
+    all. Volume was therefore always 0, which made rel_volume always 1.0 and
+    every volume-confirmation check silently pass. On real 2-year MCX data
+    that turned +0.262R / PF 1.69 into -0.378R / PF 0.37, because momentum
+    never read as DEAD so the MOMENTUM_DECAY exits (the strategy's actual
+    profit engine) stopped firing.
+    """
+    agg = TickAggregator(interval_minutes=5)
+    for i in range(60):
+        agg.add_tick(Tick(ts=epoch(0) + i * 30, ltp=100.0 + i, volume=0))
+    assert agg.volume_feed_looks_broken is True, \
+        "A feed delivering zero volume on every tick must be detectable, not silent"
+
+
+def test_healthy_volume_feed_not_flagged():
+    agg = TickAggregator(interval_minutes=5)
+    for i in range(60):
+        agg.add_tick(Tick(ts=epoch(0) + i * 30, ltp=100.0 + i, volume=1000 + i * 10))
+    assert agg.volume_feed_looks_broken is False
+
+
+def test_volume_guard_needs_enough_samples_before_judging():
+    """A handful of genuinely zero-volume ticks at session open must not
+    trigger a false alarm."""
+    agg = TickAggregator(interval_minutes=5)
+    for i in range(10):
+        agg.add_tick(Tick(ts=epoch(0) + i * 30, ltp=100.0, volume=0))
+    assert agg.volume_feed_looks_broken is False
+
+
 if __name__ == "__main__":
     tests = [
         test_first_tick_never_emits_a_candle,
@@ -99,6 +133,9 @@ if __name__ == "__main__":
         test_volume_reset_does_not_go_negative,
         test_multiple_consecutive_candles,
         test_never_emits_the_in_progress_bucket,
+        test_detects_a_feed_delivering_no_volume,
+        test_healthy_volume_feed_not_flagged,
+        test_volume_guard_needs_enough_samples_before_judging,
     ]
     failed = 0
     for t in tests:

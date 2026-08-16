@@ -85,6 +85,10 @@ class HealthResponse(BaseModel):
     mode: str
     broker_connected: bool
     data_feed: str
+    # True when the live feed has delivered no volume at all — the signature
+    # of subscribing in a mode that carries none. Surfaced here so the
+    # dashboard can show it; a silent detector nobody reads is no safety net.
+    volume_feed_broken: bool = False
 
 
 class SnapshotResponse(BaseModel):
@@ -146,9 +150,13 @@ def _simulate_next_tick() -> LiveTick:
 
 @app.get("/health", response_model=HealthResponse)
 def health():
+    volume_broken = False
+    if _angel_feed is not None and getattr(_angel_feed, "aggregator", None) is not None:
+        volume_broken = _angel_feed.aggregator.volume_feed_looks_broken
     return HealthResponse(
         status="ok", mode=settings.mode, broker_connected=LIVE_FEED_ACTIVE,
         data_feed="ANGEL_ONE_LIVE" if LIVE_FEED_ACTIVE else "PAPER_SIMULATED",
+        volume_feed_broken=volume_broken,
     )
 
 
@@ -162,13 +170,22 @@ def _get_or_advance_snapshot() -> dict:
     real feed).
     """
     if LIVE_FEED_ACTIVE:
-        return live_engine.state.last_snapshot or {
+        snap = dict(live_engine.state.last_snapshot) if live_engine.state.last_snapshot else {
             "ts": 0, "ltp": 0.0, "regime_trend": "RANGE", "last_structure_event": "NONE",
             "has_open_position": False, "open_position": None,
             "risk_state": {"trading_disabled": False, "trades_taken_today": 0,
                             "consecutive_losses": 0, "lot_multiplier": 1.0},
             "total_trades_this_session": 0,
         }
+        # The snapshot itself is only rebuilt when a candle closes (up to 5
+        # minutes apart). Overlay the latest raw tick price so the dashboard
+        # shows a current price rather than a stale bar close. Analysis
+        # fields are deliberately NOT overlaid — those must stay tied to the
+        # last completed candle.
+        if live_engine.state.last_tick_price is not None:
+            snap["ltp"] = live_engine.state.last_tick_price
+            snap["ts"] = live_engine.state.last_tick_ts or snap.get("ts", 0)
+        return snap
     tick = _simulate_next_tick()
     return live_engine.on_tick(tick)
 
@@ -418,6 +435,10 @@ _DASHBOARD_HTML = """
     </div>
   </header>
 
+  <div id="volumeWarning" style="display:none; background:rgba(194,79,66,0.12); border:1px solid rgba(194,79,66,0.4); color:var(--bear); padding:11px 14px; border-radius:8px; margin-bottom:14px; font-size:12.5px; font-weight:600;">
+    ⚠ Feed is delivering no volume. Volume-confirmation checks are meaningless in this state and the strategy will not behave like its backtest. Check the WebSocket subscription mode (needs Quote mode, not LTP).
+  </div>
+
   <div class="layout">
     <!-- left column: chart -->
     <div class="panel">
@@ -616,6 +637,7 @@ async function refresh() {
       badge.innerHTML = '<span class="dot"></span>Simulated';
       badge.className = 'pill feed-sim';
     }
+    document.getElementById('volumeWarning').style.display = health.volume_feed_broken ? 'block' : 'none';
 
     const tradesResp = await fetch('/api/trades');
     const tradesData = await tradesResp.json();

@@ -97,8 +97,18 @@ class LiveEngineState:
     open_trade_manager: TradeManager | None = None
     open_trade_entry_regime: str | None = None
     last_snapshot: dict = field(default_factory=dict)
+    # Latest raw tick price, updated on EVERY tick rather than only when a
+    # candle closes. The full pipeline still runs per completed candle —
+    # this exists purely so the dashboard can show a genuinely current
+    # price instead of one up to a whole bar stale.
+    last_tick_price: float | None = None
+    last_tick_ts: int | None = None
     trade_log: list = field(default_factory=list)
     signal_log: list = field(default_factory=list)
+    # bounded OHLCV history for chart display — not the full session (that
+    # would grow unbounded), just enough recent candles to draw a chart
+    candle_history: list = field(default_factory=list)
+    max_candle_history: int = 500
 
 
 class LiveTradingEngine:
@@ -134,6 +144,17 @@ class LiveTradingEngine:
 
         self.state = LiveEngineState()
 
+    def update_live_price(self, ltp: float, ts: int) -> None:
+        """
+        Record the latest traded price without running any strategy logic.
+        Called on every raw tick by the feed handler; the full pipeline
+        (structure, indicators, signals, trade management) still runs only
+        on completed candles via on_tick(). Deliberately does nothing else —
+        no analysis should ever run on an unclosed bar.
+        """
+        self.state.last_tick_price = ltp
+        self.state.last_tick_ts = ts
+
     def on_tick(self, tick: LiveTick) -> dict:
         """
         Processes one new CLOSED candle. Returns a snapshot dict suitable
@@ -143,6 +164,14 @@ class LiveTradingEngine:
         self.state.tick_count += 1
 
         self._handle_day_boundary(tick)
+
+        # record candle history for chart display, bounded to avoid unbounded growth
+        self.state.candle_history.append({
+            "ts": tick.ts, "open": tick.open, "high": tick.high,
+            "low": tick.low, "close": tick.close, "volume": tick.volume,
+        })
+        if len(self.state.candle_history) > self.state.max_candle_history:
+            self.state.candle_history = self.state.candle_history[-self.state.max_candle_history:]
 
         struct_candle = StructCandle(ts=tick.ts, open=tick.open, high=tick.high,
                                        low=tick.low, close=tick.close, volume=tick.volume)
