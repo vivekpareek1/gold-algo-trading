@@ -11,19 +11,23 @@ Every bug fix from the backtest validation applies here identically:
 intrabar stop checks, blended R on partials, daily counter resets,
 cooldown-based resume after a disable, and real position tracking.
 """
+import time
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from market_structure.structure_engine import (
     MarketStructureEngine, Candle as StructCandle, TrendState, StructureState
 )
-from indicators.incremental import IndicatorEngine
+from indicators.incremental import IndicatorEngine, momentum_health_from_indicator_result
 from situation_analysis.situation_analyzer import SituationAnalyzer, IndicatorSnapshot, MacroContext
 from signal_engine.signal_engine import SignalEngine, ConfluenceInputs, Decision
 from risk_engine.risk_engine import RiskEngine, DailyRiskState
 from trade_manager.trade_manager import TradeManager, TradeManagerState
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
 from execution.broker_adapters.base import BrokerProvider, OrderRequest, OrderSide
+from execution.brokerage_calculator import calculate_charges
 from gold_intelligence.fair_value import FairValueResult, MacroBiasResult
 
 
@@ -96,9 +100,41 @@ class LiveEngineState:
     disabled_since_day: object = None
     open_trade_manager: TradeManager | None = None
     open_trade_entry_regime: str | None = None
+    open_trade_lots: int = 1
+    # Real, brokerage-adjusted P&L for today — DISTINCT from
+    # risk_engine.state.daily_pnl_inr, which is an R-multiple-based
+    # approximation used for risk-management decisions (de-risking,
+    # daily loss limit). This field is for DISPLAY accuracy: without it,
+    # the "Today's Performance" panel would show a different, charges-blind
+    # number than what each individual trade row displays.
+    real_daily_net_pnl_inr: float = 0.0
     last_snapshot: dict = field(default_factory=dict)
+    # Latest raw tick price, updated on EVERY tick rather than only when a
+    # candle closes. The full pipeline still runs per completed candle —
+    # this exists purely so the dashboard can show a genuinely current
+    # price instead of one up to a whole bar stale.
+    last_tick_price: float | None = None
+    last_tick_ts: int | None = None
+    # Wall-clock time the last tick actually ARRIVED. Distinct from
+    # last_tick_ts (the exchange's own timestamp): if the feed dies, the
+    # exchange timestamp simply stops updating and looks indistinguishable
+    # from a quiet market. Comparing this against time.time() is what makes
+    # a dead feed detectable rather than silently frozen.
+    last_tick_received_at: float | None = None
+    # The reference price for a meaningful, stable "change" indicator.
+    # BUGFIX: the dashboard used to compute change against the close of the
+    # most recently completed 5-minute candle, which flips sign on ordinary
+    # tick noise every few minutes regardless of the day's real trend —
+    # showing red/down even while the actual session is strongly up. Real
+    # trading platforms compare against the DAY'S OPEN (or previous close);
+    # this is set once, on the first candle of each new trading day.
+    day_open_price: float | None = None
     trade_log: list = field(default_factory=list)
     signal_log: list = field(default_factory=list)
+    # bounded OHLCV history for chart display — not the full session (that
+    # would grow unbounded), just enough recent candles to draw a chart
+    candle_history: list = field(default_factory=list)
+    max_candle_history: int = 500
 
 
 class LiveTradingEngine:
@@ -111,7 +147,9 @@ class LiveTradingEngine:
     """
 
     def __init__(self, config, broker: BrokerProvider, symbol: str = "GOLDM",
-                 htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1):
+                 htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1,
+                 persistence_path: str | None = "trade_history.jsonl",
+                 candle_persistence_path: str | None = "candle_history.jsonl"):
         self.config = config
         self.broker = broker
         self.symbol = symbol
@@ -124,6 +162,17 @@ class LiveTradingEngine:
         self.htf_lookup_fn = htf_timeframe_lookup
         self.htf_aggregator = _LiveHTFAggregator(htf_minutes=60) if htf_timeframe_lookup is None else None
 
+        # Persistence: without this, a service restart (crash, redeploy,
+        # server reboot) silently wiped the entire in-memory trade history —
+        # not a financial risk in paper mode, but a data-completeness one:
+        # the whole point of a multi-week live paper run is the trade
+        # record, and losing it mid-run would corrupt the very analysis this
+        # was built for. Appends one JSON line per closed trade; loaded back
+        # on startup so history survives restarts. None disables persistence
+        # entirely (used by tests, which should not touch disk).
+        self.persistence_path = Path(persistence_path) if persistence_path else None
+        self.candle_persistence_path = Path(candle_persistence_path) if candle_persistence_path else None
+
         self.structure = MarketStructureEngine()
         self.indicators = IndicatorEngine()
         self.situation_analyzer = SituationAnalyzer(config)
@@ -133,6 +182,200 @@ class LiveTradingEngine:
         self.target_engine = TargetEngine(config)
 
         self.state = LiveEngineState()
+        self._load_persisted_trades()
+        self._load_persisted_candles()
+
+    def _load_persisted_trades(self):
+        """
+        Load any trade history from a previous run. Resilient per-line: a
+        real crash mid-write typically corrupts only the LAST line (the
+        write in progress when the process died), not earlier ones —
+        aborting on the first bad line would discard an entire session's
+        valid history over one truncated write at the end.
+        """
+        if self.persistence_path is None or not self.persistence_path.exists():
+            return
+        loaded, skipped = 0, 0
+        try:
+            with open(self.persistence_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self.state.trade_log.append(json.loads(line))
+                        loaded += 1
+                    except json.JSONDecodeError:
+                        skipped += 1
+        except OSError as e:
+            print(f"Warning: could not read persisted trade history "
+                  f"({type(e).__name__}: {e}) — starting with empty history.")
+            return
+        if skipped:
+            print(f"Loaded {loaded} persisted trades, skipped {skipped} corrupted line(s).")
+
+    def _persist_trade(self, trade: dict):
+        """Append one closed trade to disk. A write failure must not crash
+        the trading loop — losing one persisted record is far better than
+        losing the ability to trade."""
+        if self.persistence_path is None:
+            return
+        try:
+            with open(self.persistence_path, "a") as f:
+                f.write(json.dumps(trade) + "\n")
+        except OSError as e:
+            print(f"Warning: could not persist trade to disk: {type(e).__name__}: {e}")
+
+    def get_daily_pnl_history(self, max_days: int = 30) -> list[dict]:
+        """
+        Real, brokerage-adjusted P&L grouped by calendar day, most recent
+        first. Reads from the FULL persisted trade history on disk (not
+        just the bounded 1000-entry in-memory trade_log), so this stays
+        accurate over a multi-week paper trading run even once the
+        in-memory list has been trimmed.
+
+        Day grouping uses the same UTC-date convention as the risk engine's
+        own daily-reset logic (_handle_day_boundary) — using a different
+        convention here (e.g. IST calendar days) would make this summary
+        disagree with when the system itself considers a "day" to have
+        rolled over, which would be a confusing, silent inconsistency.
+        """
+        all_trades = list(self.state.trade_log)
+        if self.persistence_path is not None and self.persistence_path.exists():
+            all_trades = []
+            try:
+                with open(self.persistence_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                all_trades.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+            except OSError:
+                all_trades = list(self.state.trade_log)
+
+        by_day: dict = {}
+        for t in all_trades:
+            if "net_pnl_inr" not in t:
+                continue   # older-format trades persisted before brokerage tracking existed
+            day = datetime.fromtimestamp(t["ts"], tz=timezone.utc).date()
+            bucket = by_day.setdefault(day, {"trades": [], "gross": 0.0, "charges": 0.0, "net": 0.0})
+            bucket["trades"].append(t)
+            bucket["gross"] += t["gross_pnl_inr"]
+            bucket["charges"] += t["total_charges_inr"]
+            bucket["net"] += t["net_pnl_inr"]
+
+        result = []
+        for day in sorted(by_day.keys(), reverse=True)[:max_days]:
+            b = by_day[day]
+            wins = sum(1 for t in b["trades"] if t["net_pnl_inr"] > 0)
+            result.append({
+                "date": day.isoformat(),
+                "trade_count": len(b["trades"]),
+                "wins": wins,
+                "losses": len(b["trades"]) - wins,
+                "gross_pnl_inr": round(b["gross"], 2),
+                "total_charges_inr": round(b["charges"], 2),
+                "net_pnl_inr": round(b["net"], 2),
+            })
+        return result
+
+    def _load_persisted_candles(self):
+        """Same rationale as trade persistence: without this, EVERY service
+        restart (and there were many during active development) wiped the
+        chart back to empty, making it look broken even though the
+        underlying pipeline was fine — there was just never enough
+        uninterrupted runtime to accumulate more than 1-2 candles."""
+        if self.candle_persistence_path is None or not self.candle_persistence_path.exists():
+            return
+        loaded, skipped = 0, 0
+        try:
+            with open(self.candle_persistence_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self.state.candle_history.append(json.loads(line))
+                        loaded += 1
+                    except json.JSONDecodeError:
+                        skipped += 1
+            self.state.candle_history = self.state.candle_history[-self.state.max_candle_history:]
+        except OSError as e:
+            print(f"Warning: could not read persisted candle history: {type(e).__name__}: {e}")
+            return
+        if loaded:
+            print(f"Loaded {loaded} persisted candles" + (f", skipped {skipped} corrupted" if skipped else ""))
+
+    def _persist_candle(self, candle: dict):
+        if self.candle_persistence_path is None:
+            return
+        try:
+            with open(self.candle_persistence_path, "a") as f:
+                f.write(json.dumps(candle) + "\n")
+        except OSError as e:
+            print(f"Warning: could not persist candle to disk: {type(e).__name__}: {e}")
+
+    def seconds_since_last_tick(self) -> float | None:
+        """Wall-clock seconds since a tick last arrived, or None if none ever
+        has. Used to distinguish 'market is quiet' from 'the feed is dead'."""
+        if self.state.last_tick_received_at is None:
+            return None
+        return time.time() - self.state.last_tick_received_at
+
+    def update_live_price(self, ltp: float, ts: int) -> None:
+        """
+        Record the latest traded price without running any strategy logic.
+        Called on every raw tick by the feed handler; the full pipeline
+        (structure, indicators, signals, trade management) still runs only
+        on completed candles via on_tick(). Deliberately does nothing else —
+        no analysis should ever run on an unclosed bar.
+        """
+        self.state.last_tick_price = ltp
+        self.state.last_tick_ts = ts
+        self.state.last_tick_received_at = time.time()
+
+    def _tick_is_sane(self, tick: LiveTick) -> bool:
+        """
+        Input validation on every incoming candle before it ever reaches
+        structure/indicator/signal logic. Without this, a single malformed
+        feed message (network glitch, broker API bug, decimal/unit error)
+        with a zero, negative, or wildly wrong price would silently
+        corrupt ATR/EMA calculations for every candle after it, and could
+        even let a signal fire and a position open at a nonsensical price.
+        This is exactly the class of gap that must be closed before real
+        capital is ever at risk — a bad feed tick must be REJECTED and
+        logged, never quietly trusted.
+        """
+        if tick.open <= 0 or tick.high <= 0 or tick.low <= 0 or tick.close <= 0:
+            print(f"REJECTED tick at ts={tick.ts}: non-positive price "
+                  f"(O={tick.open} H={tick.high} L={tick.low} C={tick.close})")
+            return False
+        if tick.high < tick.low:
+            print(f"REJECTED tick at ts={tick.ts}: high ({tick.high}) < low ({tick.low})")
+            return False
+        if not (tick.low <= tick.open <= tick.high and tick.low <= tick.close <= tick.high):
+            print(f"REJECTED tick at ts={tick.ts}: open/close outside high-low range "
+                  f"(O={tick.open} H={tick.high} L={tick.low} C={tick.close})")
+            return False
+        if tick.volume < 0:
+            print(f"REJECTED tick at ts={tick.ts}: negative volume ({tick.volume})")
+            return False
+        # sanity-check against the last known genuine price — gold does not
+        # move 15%+ in a single 5-minute bar under any real market condition;
+        # a jump that large is far more likely a feed/decimal error than a
+        # real move, and processing it risks corrupting ATR/EMA for every
+        # subsequent candle.
+        last_price = self.state.last_snapshot.get("ltp") if self.state.last_snapshot else None
+        if last_price and last_price > 0:
+            pct_change = abs(tick.close - last_price) / last_price
+            if pct_change > 0.15:
+                print(f"REJECTED tick at ts={tick.ts}: {pct_change*100:.1f}% jump from last "
+                      f"known price {last_price} to {tick.close} — treating as feed corruption, "
+                      f"not a real move")
+                return False
+        return True
 
     def on_tick(self, tick: LiveTick) -> dict:
         """
@@ -140,9 +383,32 @@ class LiveTradingEngine:
         for API/dashboard consumption. This is the single entry point —
         everything else is internal.
         """
+        if not self._tick_is_sane(tick):
+            # return the last good snapshot unchanged rather than a crash or
+            # a corrupted one — the dashboard keeps showing the last known
+            # genuine state until a valid tick arrives
+            return self.state.last_snapshot or {
+                "ts": tick.ts, "ltp": 0.0, "day_open_price": None,
+                "regime_trend": "RANGE", "last_structure_event": "NONE",
+                "has_open_position": False, "open_position": None,
+                "risk_state": {"trading_disabled": False, "trades_taken_today": 0,
+                                "consecutive_losses": 0, "lot_multiplier": 1.0},
+                "total_trades_this_session": 0,
+            }
+
         self.state.tick_count += 1
 
         self._handle_day_boundary(tick)
+
+        # record candle history for chart display, bounded to avoid unbounded growth
+        new_candle = {
+            "ts": tick.ts, "open": tick.open, "high": tick.high,
+            "low": tick.low, "close": tick.close, "volume": tick.volume,
+        }
+        self.state.candle_history.append(new_candle)
+        self._persist_candle(new_candle)
+        if len(self.state.candle_history) > self.state.max_candle_history:
+            self.state.candle_history = self.state.candle_history[-self.state.max_candle_history:]
 
         struct_candle = StructCandle(ts=tick.ts, open=tick.open, high=tick.high,
                                        low=tick.low, close=tick.close, volume=tick.volume)
@@ -172,12 +438,20 @@ class LiveTradingEngine:
         day = datetime.fromtimestamp(tick.ts, tz=timezone.utc).date()
         if self.state.current_day is None:
             self.state.current_day = day
+            # First tick this engine has ever seen — if the service started
+            # mid-session (e.g. after a restart), this is the best available
+            # reference rather than the true session open, but it's still
+            # far more meaningful than comparing against a rolling 5-minute
+            # window.
+            self.state.day_open_price = tick.open
             return
         if day == self.state.current_day:
             return
 
         self.risk_engine.state.trades_taken_today = 0
         self.risk_engine.state.daily_pnl_inr = 0.0
+        self.state.real_daily_net_pnl_inr = 0.0
+        self.state.day_open_price = tick.open
 
         if (self.risk_engine.state.trading_disabled
                 and self.cooldown_days_after_disable is not None
@@ -192,7 +466,7 @@ class LiveTradingEngine:
     # ---------- managing an open position ----------
     def _manage_open_trade(self, tick: LiveTick, ind_result: dict, struct_state):
         tm = self.state.open_trade_manager
-        momentum_health = self._momentum_from_indicators(ind_result)
+        momentum_health = momentum_health_from_indicator_result(ind_result)
         structure_broke = struct_state.last_event.value.startswith("CHOCH") and (
             (tm.state.direction == "LONG" and "BEARISH" in struct_state.last_event.value) or
             (tm.state.direction == "SHORT" and "BULLISH" in struct_state.last_event.value)
@@ -209,18 +483,30 @@ class LiveTradingEngine:
             exit_price = (tm.state.state_history[-1].price_at_event
                           if tm.state.state_history else tick.close)
             r = tm.blended_r_multiple(exit_price)
+            charges = calculate_charges(
+                direction=tm.state.direction, entry_price=tm.state.entry_price,
+                exit_price=exit_price, lots=self.state.open_trade_lots,
+                point_value_inr=self.config.instrument.point_value_inr,
+            )
             self.risk_engine.record_trade_result(r * self.config.risk.max_risk_per_trade_inr)
+            self.state.real_daily_net_pnl_inr += charges.net_pnl_inr
             if self.risk_engine.state.trading_disabled and self.state.disabled_since_day is None:
                 self.state.disabled_since_day = self.state.current_day
 
-            self.state.trade_log.append({
+            closed_trade = {
                 "entry_price": tm.state.entry_price, "exit_price": exit_price,
                 "direction": tm.state.direction, "r_multiple": r,
                 "exit_reason": tm.state.exit_reason.value, "ts": tick.ts,
                 "entry_regime": self.state.open_trade_entry_regime,
-            })
+                "lots": self.state.open_trade_lots,
+                "gross_pnl_inr": charges.gross_pnl_inr,
+                "total_charges_inr": charges.total_charges_inr,
+                "net_pnl_inr": charges.net_pnl_inr,
+            }
+            self.state.trade_log.append(closed_trade)
+            self._persist_trade(closed_trade)
             # bounded like signal_log — a long-running live session must not
-            # grow memory without limit. Persist to the DB layer for full history.
+            # grow memory without limit. Full history lives in persistence_path.
             self.state.trade_log = self.state.trade_log[-1000:]
             self.risk_engine.register_position_closed()
             self.state.open_trade_manager = None
@@ -285,9 +571,30 @@ class LiveTradingEngine:
 
         risk_reward = abs(target_result.target_2 - tick.close) / stop_result.distance_points
 
+        # BUGFIX: data_is_stale was hardcoded False — dead code, since the
+        # protection never actually engaged. A naive "seconds since last
+        # tick received" check turned out to be structurally useless here
+        # too: by the time this runs, a tick just arrived by construction,
+        # so it would always read as fresh. The real signal that matters is
+        # a GAP between consecutive completed candles — if the feed dropped
+        # for 15+ minutes and reconnected, the candle immediately after
+        # that gap was built on an interrupted data stream (indicators may
+        # be stale/wrong), and must not be trusted for a fresh entry even
+        # though the CURRENT tick itself is perfectly fresh.
+        expected_interval_sec = 300  # 5-minute candles
+        candle_gap_detected = False
+        if len(self.state.candle_history) >= 2:
+            prev_candle_ts = self.state.candle_history[-2]["ts"]
+            actual_gap = tick.ts - prev_candle_ts
+            if actual_gap > expected_interval_sec * 2.5:
+                candle_gap_detected = True
+                print(f"Data gap detected: {actual_gap}s between candles "
+                      f"(expected ~{expected_interval_sec}s) — skipping entry "
+                      f"evaluation on this candle, feed likely dropped and recovered.")
+
         veto = self.risk_engine.check_hard_limits(
             live_equity_inr=self.broker.get_balance().equity_inr,
-            data_is_stale=False, position_already_open=False,
+            data_is_stale=candle_gap_detected, position_already_open=False,
         )
         if veto.value != "NONE":
             return
@@ -315,18 +622,14 @@ class LiveTradingEngine:
         )
         self.state.open_trade_manager = TradeManager(self.config, tm_state)
         self.state.open_trade_entry_regime = situation.regime.value
+        self.state.open_trade_lots = sizing.lots
         self.risk_engine.register_position_opened()
-
-    def _momentum_from_indicators(self, ind_result: dict) -> str:
-        macd_accel = abs(ind_result["macd_hist"]) > abs(ind_result["macd_hist_prev"])
-        volume_ok = ind_result["rel_volume"] >= 1.0
-        score = sum([macd_accel, volume_ok])
-        return "STRONG" if score == 2 else ("WEAKENING" if score == 1 else "DEAD")
 
     def _build_snapshot(self, tick: LiveTick, struct_state, ind_result: dict) -> dict:
         tm = self.state.open_trade_manager
         return {
             "ts": tick.ts, "ltp": tick.close,
+            "day_open_price": self.state.day_open_price,
             "regime_trend": struct_state.trend.value,
             "last_structure_event": struct_state.last_event.value,
             "has_open_position": tm is not None,
