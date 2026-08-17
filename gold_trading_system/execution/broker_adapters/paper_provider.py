@@ -74,6 +74,17 @@ class PaperBrokerProvider(BrokerProvider):
         self._margin_used = margin_used_inr
         self._equity = equity_inr
 
+    def adjust_equity(self, delta_inr: float):
+        """
+        Directly adjusts equity by a signed delta — used to reconcile the
+        broker's own simplified internal commission model against the more
+        realistic MCX charges (CTT/GST/exchange/stamp duty) shown on the
+        dashboard, so displayed equity always exactly matches "starting
+        equity + sum of displayed net P&L" rather than silently disagreeing
+        with what the trade list shows.
+        """
+        self._equity += delta_inr
+
     def get_orders(self) -> list[OrderResult]:
         return list(self._orders.values())
 

@@ -706,14 +706,50 @@ class LiveTradingEngine:
             self._persist_open_position()
 
         if tm.state.trade_state.value == "EXITED":
-            exit_price = (tm.state.state_history[-1].price_at_event
+            # BUGFIX (real accounting bug found via live-trade equity check):
+            # exits NEVER called broker.place_order() — only entries did.
+            # This meant the broker's own position/equity bookkeeping never
+            # actually closed, so: (a) the NEXT entry's place_order() would
+            # find a still-"open" position in the broker's books and could
+            # mishandle quantity/avg_price tracking, and (b) equity only
+            # ever reflected the entry commission, never a proper close.
+            # Fix: place a REAL opposite-side closing order, use the
+            # broker's ACTUAL fill price (not an analytically-estimated
+            # one) as the authoritative exit price, and reconcile equity
+            # to exactly match the realistic charges shown in the
+            # dashboard (CTT/GST/exchange/stamp — not the broker's own
+            # simplified flat commission model), so "starting equity + sum
+            # of displayed net P&L" always holds exactly.
+            analytical_exit_price = (tm.state.state_history[-1].price_at_event
                           if tm.state.state_history else tick.close)
+            close_side = OrderSide.SELL if tm.state.direction == "LONG" else OrderSide.BUY
+            close_order = OrderRequest(
+                client_order_id=f"CLOSE-{tick.ts}-{self.state.tick_count}",
+                symbol=self.symbol, side=close_side, quantity=self.state.open_trade_lots,
+            )
+            equity_before_close = self.broker.get_balance().equity_inr
+            close_fill = self.broker.place_order(close_order)
+            exit_price = (close_fill.filled_price if close_fill.status.value == "FILLED"
+                           else analytical_exit_price)
+
             r = tm.blended_r_multiple(exit_price)
             charges = calculate_charges(
                 direction=tm.state.direction, entry_price=tm.state.entry_price,
                 exit_price=exit_price, lots=self.state.open_trade_lots,
                 point_value_inr=self.config.instrument.point_value_inr,
             )
+            # reconcile: the broker's own place_order() already applied its
+            # own (simpler) commission + realized P&L to equity. Adjust by
+            # the delta so the FINAL equity matches our realistic charges
+            # model exactly, rather than silently disagreeing with the
+            # dashboard's displayed numbers.
+            equity_after_broker_close = self.broker.get_balance().equity_inr
+            broker_applied_delta = equity_after_broker_close - equity_before_close
+            target_delta = charges.net_pnl_inr
+            reconciliation = target_delta - broker_applied_delta
+            if hasattr(self.broker, "adjust_equity"):
+                self.broker.adjust_equity(reconciliation)
+
             self.risk_engine.record_trade_result(r * self.config.risk.max_risk_per_trade_inr)
             self.state.real_daily_net_pnl_inr += charges.net_pnl_inr
             if self.risk_engine.state.trading_disabled and self.state.disabled_since_day is None:
