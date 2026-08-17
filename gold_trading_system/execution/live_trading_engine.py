@@ -128,6 +128,16 @@ class LiveEngineState:
     # this flag lets entry evaluation start immediately after a restart
     # instead of needing 30 fresh candles (2.5 hours) rebuilt from scratch.
     indicators_warmed_up_from_replay: bool = False
+    # Tracks consecutive REJECTED ticks, specifically for the price-jump
+    # check. See _tick_is_sane — without this, a genuine large move (rare,
+    # but real gaps do happen) would be rejected FOREVER, since the
+    # reference price it's compared against never updates on rejection.
+    # Worse: on_tick() returns early on rejection, meaning an OPEN
+    # POSITION's stop-loss/trailing check never runs either — a permanent
+    # cascade here would leave a live trade's risk management silently
+    # frozen. Same class of bug as an earlier data_loader cascade found
+    # during backtesting; same fix shape applies.
+    consecutive_price_jump_rejections: int = 0
     # The reference price for a meaningful, stable "change" indicator.
     # BUGFIX: the dashboard used to compute change against the close of the
     # most recently completed 5-minute candle, which flips sign on ordinary
@@ -411,20 +421,46 @@ class LiveTradingEngine:
             return False
         if tick.volume < 0:
             print(f"REJECTED tick at ts={tick.ts}: negative volume ({tick.volume})")
+            self.state.consecutive_price_jump_rejections = 0
             return False
         # sanity-check against the last known genuine price — gold does not
-        # move 15%+ in a single 5-minute bar under any real market condition;
-        # a jump that large is far more likely a feed/decimal error than a
-        # real move, and processing it risks corrupting ATR/EMA for every
-        # subsequent candle.
+        # move 15%+ in a single 5-minute bar under NORMAL conditions; a jump
+        # that large is more likely a feed/decimal error than a real move.
+        #
+        # BUGFIX (found during live-trade review, real incident risk): the
+        # ORIGINAL version of this check rejected such a tick forever if the
+        # move was genuine — the reference price (last_snapshot) only
+        # updates on ACCEPTED ticks, so a real large gap would be rejected,
+        # the reference would stay frozen, and every SUBSEQUENT tick would
+        # ALSO fail the same check against that same stale reference —
+        # a permanent rejection cascade. Worse: on_tick() returns early on
+        # rejection, so an OPEN POSITION's stop-loss/trailing check would
+        # never run again either, silently freezing risk management on a
+        # live trade. Same failure shape as an earlier data_loader cascade
+        # bug found during backtesting.
+        #
+        # Fix: after 3 CONSECUTIVE rejections for this same reason, treat
+        # it as a genuine move rather than a glitch — a real feed glitch is
+        # transient (one bad tick), but a genuine gap persists across
+        # multiple readings at the new level. This distinguishes the two
+        # without ever getting permanently stuck.
         last_price = self.state.last_snapshot.get("ltp") if self.state.last_snapshot else None
         if last_price and last_price > 0:
             pct_change = abs(tick.close - last_price) / last_price
             if pct_change > 0.15:
+                self.state.consecutive_price_jump_rejections += 1
+                if self.state.consecutive_price_jump_rejections >= 3:
+                    print(f"ACCEPTING tick at ts={tick.ts} despite {pct_change*100:.1f}% jump — "
+                          f"3 consecutive readings at this level, treating as a genuine "
+                          f"move, not a glitch.")
+                    self.state.consecutive_price_jump_rejections = 0
+                    return True
                 print(f"REJECTED tick at ts={tick.ts}: {pct_change*100:.1f}% jump from last "
                       f"known price {last_price} to {tick.close} — treating as feed corruption, "
-                      f"not a real move")
+                      f"not a real move ({self.state.consecutive_price_jump_rejections}/3 "
+                      f"consecutive; will accept if this persists)")
                 return False
+        self.state.consecutive_price_jump_rejections = 0
         return True
 
     def on_tick(self, tick: LiveTick) -> dict:
