@@ -27,6 +27,7 @@ from risk_engine.risk_engine import RiskEngine, DailyRiskState
 from trade_manager.trade_manager import TradeManager, TradeManagerState
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
 from execution.broker_adapters.base import BrokerProvider, OrderRequest, OrderSide
+from execution.brokerage_calculator import calculate_charges
 from gold_intelligence.fair_value import FairValueResult, MacroBiasResult
 
 
@@ -99,6 +100,14 @@ class LiveEngineState:
     disabled_since_day: object = None
     open_trade_manager: TradeManager | None = None
     open_trade_entry_regime: str | None = None
+    open_trade_lots: int = 1
+    # Real, brokerage-adjusted P&L for today — DISTINCT from
+    # risk_engine.state.daily_pnl_inr, which is an R-multiple-based
+    # approximation used for risk-management decisions (de-risking,
+    # daily loss limit). This field is for DISPLAY accuracy: without it,
+    # the "Today's Performance" panel would show a different, charges-blind
+    # number than what each individual trade row displays.
+    real_daily_net_pnl_inr: float = 0.0
     last_snapshot: dict = field(default_factory=dict)
     # Latest raw tick price, updated on EVERY tick rather than only when a
     # candle closes. The full pipeline still runs per completed candle —
@@ -291,6 +300,7 @@ class LiveTradingEngine:
 
         self.risk_engine.state.trades_taken_today = 0
         self.risk_engine.state.daily_pnl_inr = 0.0
+        self.state.real_daily_net_pnl_inr = 0.0
         self.state.day_open_price = tick.open
 
         if (self.risk_engine.state.trading_disabled
@@ -323,7 +333,13 @@ class LiveTradingEngine:
             exit_price = (tm.state.state_history[-1].price_at_event
                           if tm.state.state_history else tick.close)
             r = tm.blended_r_multiple(exit_price)
+            charges = calculate_charges(
+                direction=tm.state.direction, entry_price=tm.state.entry_price,
+                exit_price=exit_price, lots=self.state.open_trade_lots,
+                point_value_inr=self.config.instrument.point_value_inr,
+            )
             self.risk_engine.record_trade_result(r * self.config.risk.max_risk_per_trade_inr)
+            self.state.real_daily_net_pnl_inr += charges.net_pnl_inr
             if self.risk_engine.state.trading_disabled and self.state.disabled_since_day is None:
                 self.state.disabled_since_day = self.state.current_day
 
@@ -332,6 +348,10 @@ class LiveTradingEngine:
                 "direction": tm.state.direction, "r_multiple": r,
                 "exit_reason": tm.state.exit_reason.value, "ts": tick.ts,
                 "entry_regime": self.state.open_trade_entry_regime,
+                "lots": self.state.open_trade_lots,
+                "gross_pnl_inr": charges.gross_pnl_inr,
+                "total_charges_inr": charges.total_charges_inr,
+                "net_pnl_inr": charges.net_pnl_inr,
             }
             self.state.trade_log.append(closed_trade)
             self._persist_trade(closed_trade)
@@ -431,6 +451,7 @@ class LiveTradingEngine:
         )
         self.state.open_trade_manager = TradeManager(self.config, tm_state)
         self.state.open_trade_entry_regime = situation.regime.value
+        self.state.open_trade_lots = sizing.lots
         self.risk_engine.register_position_opened()
 
     def _build_snapshot(self, tick: LiveTick, struct_state, ind_result: dict) -> dict:

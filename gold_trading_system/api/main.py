@@ -262,7 +262,11 @@ def get_performance():
     balance = broker.get_balance()
     return PerformanceResponse(
         trades_taken=st.trades_taken_today, max_trades=settings.risk.max_trades_per_day,
-        net_pnl=round(st.daily_pnl_inr, 2),
+        # BUGFIX: this used to show risk_engine's R-multiple-based daily_pnl_inr,
+        # an approximation used internally for de-risking decisions. It gave
+        # a DIFFERENT number than each trade row's real, brokerage-adjusted
+        # net P&L — showing the real, charges-inclusive total here instead.
+        net_pnl=round(live_engine.state.real_daily_net_pnl_inr, 2),
         total_trades_this_session=len(live_engine.state.trade_log),
         current_streak=max(st.consecutive_wins, st.consecutive_losses),
         lot_multiplier=st.current_lot_multiplier, scaleup_recommended=st.scaleup_recommended,
@@ -427,7 +431,12 @@ _DASHBOARD_HTML = """
     display: flex; align-items: center; gap: 10px; padding: 10px 0;
     border-bottom: 1px solid var(--panel-border); font-size: 13px;
   }
-  .trade-item:last-child { border-bottom: none; }
+  .trade-item-full:last-child .trade-item { border-bottom: none; }
+  .trade-sub {
+    font-size: 11px; color: var(--text-faint); padding: 0 0 10px 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .trade-item-full:last-child .trade-sub { border-bottom: none; }
   .trade-badge {
     font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.03em;
   }
@@ -746,14 +755,26 @@ async function refresh() {
     if (trades.length === 0) {
       document.getElementById('tradesList').innerHTML = '<div class="empty-note">No trades yet this session.</div>';
     } else {
-      document.getElementById('tradesList').innerHTML = trades.map(t => `
-        <div class="trade-item">
-          <span class="trade-badge ${t.direction==='LONG'?'long':'short'}">${t.direction}</span>
-          <span class="trade-detail mono">₹${fmt(t.entry_price)} → ₹${fmt(t.exit_price)}</span>
-          <span class="trade-reason">${t.exit_reason}</span>
-          <span class="trade-r mono ${t.r_multiple>=0?'bull':'bear'}">${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R</span>
-        </div>`
-      ).join('');
+      document.getElementById('tradesList').innerHTML = trades.map(t => {
+        const hasCharges = typeof t.net_pnl_inr === 'number';
+        const netPnl = hasCharges ? t.net_pnl_inr : null;
+        const pnlLine = hasCharges
+          ? `<span class="trade-r mono ${netPnl>=0?'bull':'bear'}">${netPnl>=0?'+':''}₹${fmt(netPnl)}</span>`
+          : `<span class="trade-r mono ${t.r_multiple>=0?'bull':'bear'}">${t.r_multiple>=0?'+':''}${t.r_multiple.toFixed(2)}R</span>`;
+        const subLine = hasCharges
+          ? `<div class="trade-sub">Gross ₹${fmt(t.gross_pnl_inr)} · Charges ₹${fmt(t.total_charges_inr)} · ${t.lots} lot${t.lots>1?'s':''} · ${t.r_multiple.toFixed(2)}R</div>`
+          : '';
+        return `
+        <div class="trade-item-full">
+          <div class="trade-item">
+            <span class="trade-badge ${t.direction==='LONG'?'long':'short'}">${t.direction}</span>
+            <span class="trade-detail mono">₹${fmt(t.entry_price)} → ₹${fmt(t.exit_price)}</span>
+            <span class="trade-reason">${t.exit_reason}</span>
+            ${pnlLine}
+          </div>
+          ${subLine}
+        </div>`;
+      }).join('');
     }
 
     await loadCandleHistory();

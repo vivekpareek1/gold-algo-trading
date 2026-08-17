@@ -30,6 +30,7 @@ from execution.broker_adapters.paper_provider import PaperBrokerProvider
 from execution.broker_adapters.base import OrderRequest, OrderSide
 from backtesting.metrics import compute_metrics, BacktestMetrics
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
+from execution.brokerage_calculator import calculate_charges
 
 
 @dataclass
@@ -212,6 +213,12 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                 r = open_trade_manager.blended_r_multiple(exit_price)
                 r_multiples.append(r)
                 risk_engine.record_trade_result(r * config.risk.max_risk_per_trade_inr)
+                charges = calculate_charges(
+                    direction=open_trade_manager.state.direction,
+                    entry_price=open_trade_manager.state.entry_price,
+                    exit_price=exit_price, lots=open_trade_lots,
+                    point_value_inr=config.instrument.point_value_inr,
+                )
                 trade_log.append({
                     "entry_price": open_trade_manager.state.entry_price,
                     "exit_price": exit_price,
@@ -220,6 +227,10 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                     "exit_reason": open_trade_manager.state.exit_reason.value,
                     "ts": candle.ts,
                     "entry_regime": open_trade_entry_regime,
+                    "lots": open_trade_lots,
+                    "gross_pnl_inr": charges.gross_pnl_inr,
+                    "total_charges_inr": charges.total_charges_inr,
+                    "net_pnl_inr": charges.net_pnl_inr,
                 })
                 risk_engine.register_position_closed()
                 open_trade_manager = None
@@ -324,6 +335,7 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         )
         open_trade_manager = TradeManager(config, tm_state)
         open_trade_entry_regime = situation.regime.value
+        open_trade_lots = sizing.lots
         risk_engine.register_position_opened()
 
     metrics = compute_metrics(r_multiples)
