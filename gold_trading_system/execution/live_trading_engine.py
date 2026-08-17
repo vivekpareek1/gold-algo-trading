@@ -130,6 +130,15 @@ class LiveEngineState:
     # this flag lets entry evaluation start immediately after a restart
     # instead of needing 30 fresh candles (2.5 hours) rebuilt from scratch.
     indicators_warmed_up_from_replay: bool = False
+    # Real-data finding: a same-direction entry within 2 hours of a
+    # MOMENTUM_DECAY exit performs far worse than a fresh entry (LONG:
+    # +0.101R vs +0.378R; SHORT: -0.100R vs +0.647R on 2-year real MCX
+    # data — confirmed via backtest, aggregate expectancy improved
+    # +0.262R to +0.332R with this gate active). Tracks the most recent
+    # decay exit so a same-direction re-entry can be blocked for a
+    # cooldown window; the OPPOSITE direction is never blocked.
+    last_momentum_decay_exit_direction: str | None = None
+    last_momentum_decay_exit_ts: int | None = None
     # Tracks consecutive REJECTED ticks, specifically for the price-jump
     # check. See _tick_is_sane — without this, a genuine large move (rare,
     # but real gaps do happen) would be rejected FOREVER, since the
@@ -771,6 +780,9 @@ class LiveTradingEngine:
             # grow memory without limit. Full history lives in persistence_path.
             self.state.trade_log = self.state.trade_log[-1000:]
             self.risk_engine.register_position_closed()
+            if tm.state.exit_reason.value == "MOMENTUM_DECAY":
+                self.state.last_momentum_decay_exit_direction = tm.state.direction
+                self.state.last_momentum_decay_exit_ts = tick.ts
             self.state.open_trade_manager = None
             self.state.open_trade_entry_regime = None
             self._clear_persisted_open_position()
@@ -816,6 +828,13 @@ class LiveTradingEngine:
             return
 
         direction = "LONG" if result.decision == Decision.BUY else "SHORT"
+
+        SAME_DIRECTION_REENTRY_COOLDOWN_SEC = 7200  # 2 hours — see LiveEngineState field docstring
+        if (self.state.last_momentum_decay_exit_direction == direction
+                and self.state.last_momentum_decay_exit_ts is not None
+                and tick.ts - self.state.last_momentum_decay_exit_ts <= SAME_DIRECTION_REENTRY_COOLDOWN_SEC):
+            return   # blocked: chasing the same direction right after it decayed
+
         nsl = struct_state.swing_lows[-1].price if struct_state.swing_lows else None
         nsh = struct_state.swing_highs[-1].price if struct_state.swing_highs else None
 

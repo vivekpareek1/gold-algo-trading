@@ -92,10 +92,21 @@ def _htf_trend_as_of(base_ts: int, htf_lookup: dict[int, TrendState],
 def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | None = None,
                   base_timeframe: str = "5M", htf_timeframe: str | None = None,
                   cooldown_days_after_disable: int | None = 1,
+                  same_direction_reentry_cooldown_sec: int | None = None,
                   verbose: bool = False) -> BacktestResult:
     """
     candles: chronologically ordered OHLCV list (already historical, no
     forward-looking data).
+
+    same_direction_reentry_cooldown_sec: if set, blocks a new entry in the
+    SAME direction as the most recent MOMENTUM_DECAY exit, for this many
+    seconds after that exit. Found via real-data analysis: re-entering the
+    same direction shortly after a momentum-decay exit performs far worse
+    than fresh entries (LONG: +0.101R vs +0.378R; SHORT: -0.100R vs
+    +0.647R on real 2-year MCX data) — the opposite direction is NOT
+    blocked, since momentum decay doesn't mean "avoid trading," just
+    "don't immediately chase the same direction again." None (default)
+    preserves the original behavior for backward compatibility.
 
     Two ways to supply the higher-timeframe trend:
     - htf_trend_override: hold it constant (fast, simplified — useful for
@@ -131,6 +142,10 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
     open_trade_manager: TradeManager | None = None
     open_trade_entry_regime: str | None = None   # tracks the regime active at entry, for regime analytics
     r_multiples: list[float] = []
+    # See same_direction_reentry_cooldown_sec docstring — tracks the most
+    # recent MOMENTUM_DECAY exit so a same-direction re-entry can be
+    # gated for a cooldown window.
+    last_momentum_decay_exit: dict | None = None
     # BUGFIX: max_trades_per_day / daily_pnl were never reset across calendar
     # day boundaries, so "4 trades per day" silently became "4 trades across
     # the ENTIRE backtest" — every prior multi-day/multi-year backtest result
@@ -233,6 +248,11 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                     "net_pnl_inr": charges.net_pnl_inr,
                 })
                 risk_engine.register_position_closed()
+                # track for the same-direction re-entry cooldown check
+                if open_trade_manager.state.exit_reason.value == "MOMENTUM_DECAY":
+                    last_momentum_decay_exit = {
+                        "direction": open_trade_manager.state.direction, "ts": candle.ts,
+                    }
                 open_trade_manager = None
                 open_trade_entry_regime = None
             continue  # don't evaluate a new entry the same candle we're managing an exit
@@ -282,6 +302,12 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             continue
 
         direction = "LONG" if result.decision == Decision.BUY else "SHORT"
+
+        if (same_direction_reentry_cooldown_sec is not None and last_momentum_decay_exit
+                and last_momentum_decay_exit["direction"] == direction
+                and candle.ts - last_momentum_decay_exit["ts"] <= same_direction_reentry_cooldown_sec):
+            continue   # blocked: chasing the same direction right after it decayed
+
         entry_price = candle.close
 
         nearest_swing_low = (struct_state.swing_lows[-1].price if struct_state.swing_lows else None)
