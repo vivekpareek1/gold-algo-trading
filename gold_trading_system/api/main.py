@@ -22,6 +22,7 @@ from config.settings import Settings
 from execution.broker_adapters.paper_provider import PaperBrokerProvider
 from execution.live_trading_engine import LiveTradingEngine, LiveTick
 from market_data.external_quotes import ExternalQuotesPoller
+from news_engine.live_news_poller import GoldNewsMonitor
 
 app = FastAPI(title="Gold Trading System API", version="0.1.0")
 
@@ -57,7 +58,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-broker-close-fix-v13"
+BUILD_VERSION = "2026-08-17-gold-news-v14"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -70,6 +71,11 @@ LIVE_FEED_ACTIVE = False
 # External reference quotes — independent of the trading feed, polled every
 # 60 seconds. Display-only.
 external_quotes_poller = ExternalQuotesPoller(poll_interval_sec=60)
+
+# Gold news monitor — display-only context, same pattern as external
+# quotes above. Polled less frequently (news doesn't need 60s freshness
+# like a price feed) to be gentle on Yahoo's free RSS endpoint.
+gold_news_monitor = GoldNewsMonitor(poll_interval_sec=300)
 try:
     from angel_one_feed import AngelOneLiveFeed
     _angel_feed = AngelOneLiveFeed(live_engine)
@@ -94,6 +100,9 @@ def start_feed():
     # into any trading decision.
     external_quotes_poller.start_background_thread()
     print("Started external reference quotes poller (USD/INR, COMEX Gold, DXY).")
+
+    gold_news_monitor.start_background_thread()
+    print("Started gold news monitor (Yahoo Finance RSS — Bloomberg-sourced headlines).")
 
 
 def _get_market_session_status() -> dict:
@@ -343,6 +352,25 @@ def get_external_quotes():
     }
 
 
+@app.get("/api/news")
+def get_gold_news():
+    """Recent gold-relevant headlines (Bloomberg-sourced via Yahoo Finance
+    RSS), classified for impact. Display-only — does not gate trading."""
+    assessments = gold_news_monitor.get_assessments(limit=10)
+    return {
+        "risk_state": gold_news_monitor.get_current_risk_state().value,
+        "items": [
+            {
+                "text": a.item.text, "author": a.item.author,
+                "published_at": a.item.published_at.isoformat(),
+                "url": a.item.url, "impact_level": a.impact_level,
+                "matched_keywords": a.matched_keywords,
+            }
+            for a in assessments
+        ],
+    }
+
+
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
     """Pushes a fresh snapshot every ~2 seconds. In LIVE mode this just reads
@@ -506,6 +534,16 @@ _DASHBOARD_HTML = """
   .day-row .day-stats { color: var(--text-faint); font-size: 11.5px; }
   .day-row .day-net { text-align: right; font-weight: 700; }
   .day-row .day-charges { text-align: right; color: var(--text-faint); font-size: 11px; }
+
+  .news-item { padding: 10px 0; border-bottom: 1px solid var(--panel-border); font-size: 13px; }
+  .news-item:last-child { border-bottom: none; }
+  .news-item a { color: var(--text); text-decoration: none; }
+  .news-item a:hover { color: var(--gold-soft); }
+  .news-meta { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; display: flex; gap: 8px; align-items: center; }
+  .news-impact { padding: 1px 6px; border-radius: 3px; font-weight: 700; text-transform: uppercase; font-size: 9.5px; }
+  .news-impact.HIGH { background: var(--bear-soft); color: var(--bear); }
+  .news-impact.MEDIUM { background: rgba(201,162,39,0.14); color: var(--gold-soft); }
+  .news-impact.LOW { background: var(--panel-2); color: var(--text-faint); }
   .trade-badge {
     font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.03em;
   }
@@ -659,6 +697,19 @@ _DASHBOARD_HTML = """
                 text-decoration:none; font-size:13px; font-weight:600;">
         Open GOLDM chart on TradingView ↗
       </a>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head">
+      <h3>Gold News</h3>
+      <span id="newsRiskBadge" class="mono" style="font-size:11px; color:var(--text-faint);">--</span>
+    </div>
+    <div class="panel-body">
+      <div style="padding:0 0 10px; font-size:11px; color:var(--text-faint);">
+        Bloomberg-sourced headlines via Yahoo Finance — display-only, does not gate trading decisions.
+      </div>
+      <div id="newsList"><div class="empty-note">Loading news...</div></div>
     </div>
   </div>
 
@@ -839,6 +890,43 @@ async function loadExternalQuotes() {
   }
 }
 
+async function loadGoldNews() {
+  try {
+    const resp = await fetch('/api/news');
+    const data = await resp.json();
+    const badge = document.getElementById('newsRiskBadge');
+    const riskColors = {
+      'NORMAL': 'var(--text-faint)', 'EVENT_APPROACHING': 'var(--gold-soft)',
+      'HIGH_IMPACT': 'var(--bear)', 'POST_EVENT_VOLATILITY': 'var(--gold-soft)',
+    };
+    badge.textContent = data.risk_state;
+    badge.style.color = riskColors[data.risk_state] || 'var(--text-faint)';
+
+    const listEl = document.getElementById('newsList');
+    if (!data.items || data.items.length === 0) {
+      listEl.innerHTML = '<div class="empty-note">No recent news loaded yet.</div>';
+      return;
+    }
+    listEl.innerHTML = data.items.slice(0, 8).map(item => {
+      const time = new Date(item.published_at).toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+      });
+      const titleHtml = item.url
+        ? `<a href="${item.url}" target="_blank" rel="noopener">${item.text}</a>`
+        : item.text;
+      return `<div class="news-item">
+        <div>${titleHtml}</div>
+        <div class="news-meta">
+          <span class="news-impact ${item.impact_level}">${item.impact_level}</span>
+          <span>${item.author}</span><span>·</span><span>${time}</span>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    console.error('News load error:', e);
+  }
+}
+
 async function refresh() {
   try {
     const snapResp = await fetch('/api/snapshot');
@@ -940,6 +1028,7 @@ async function refresh() {
     await loadCandleHistory();
     await loadDailyPnl();
     await loadExternalQuotes();
+    await loadGoldNews();
 
     document.getElementById('status').textContent = 'Last updated ' + new Date().toLocaleTimeString();
   } catch (e) {
