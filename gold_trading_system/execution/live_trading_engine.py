@@ -121,6 +121,13 @@ class LiveEngineState:
     # from a quiet market. Comparing this against time.time() is what makes
     # a dead feed detectable rather than silently frozen.
     last_tick_received_at: float | None = None
+    # Set True once persisted candles have been replayed through the
+    # indicator/structure engines on startup (see
+    # _replay_persisted_candles_for_warmup). Separate from tick_count,
+    # which still tracks genuinely NEW real-time ticks this session —
+    # this flag lets entry evaluation start immediately after a restart
+    # instead of needing 30 fresh candles (2.5 hours) rebuilt from scratch.
+    indicators_warmed_up_from_replay: bool = False
     # The reference price for a meaningful, stable "change" indicator.
     # BUGFIX: the dashboard used to compute change against the close of the
     # most recently completed 5-minute candle, which flips sign on ordinary
@@ -184,6 +191,7 @@ class LiveTradingEngine:
         self.state = LiveEngineState()
         self._load_persisted_trades()
         self._load_persisted_candles()
+        self._replay_persisted_candles_for_warmup()
 
     def _load_persisted_trades(self):
         """
@@ -317,6 +325,48 @@ class LiveTradingEngine:
         except OSError as e:
             print(f"Warning: could not persist candle to disk: {type(e).__name__}: {e}")
 
+    def _replay_persisted_candles_for_warmup(self):
+        """
+        BUGFIX (real incident): candle_history was persisted across restarts
+        (for the chart), but the indicator/structure engines were NOT — they
+        rebuilt from scratch every restart, meaning tick_count needed 30
+        genuinely NEW real-time candles (2.5 hours) before any signal could
+        be evaluated, even when perfectly good recent history already sat
+        on disk unused. A real restart at 14:27 UTC would have delayed
+        warmup past 22:27 IST, costing nearly the entire remaining session.
+
+        Fix: replay the already-persisted candles through the structure and
+        indicator engines on startup (silently, building up their internal
+        state — EMAs, ATR, swing points — exactly as if they'd been running
+        continuously) WITHOUT evaluating any trade decisions on them. This
+        does NOT affect tick_count (which still gates live decision-making
+        on genuinely fresh data) — it only fast-forwards the indicators so
+        that once real ticks resume, they're immediately usable rather than
+        needing another multi-hour rebuild.
+        """
+        if not self.state.candle_history:
+            return
+        replayed = 0
+        for c in self.state.candle_history:
+            try:
+                struct_candle = StructCandle(ts=c["ts"], open=c["open"], high=c["high"],
+                                                low=c["low"], close=c["close"], volume=c["volume"])
+                self.structure.update(struct_candle, current_atr=self.indicators.atr.value or 1.0,
+                                         higher_tf_trend=TrendState.RANGE)
+                self.indicators.update(c["high"], c["low"], c["close"], c["volume"])
+                if self.htf_aggregator is not None:
+                    replay_tick = LiveTick(ts=c["ts"], open=c["open"], high=c["high"],
+                                             low=c["low"], close=c["close"], volume=c["volume"])
+                    self.htf_aggregator.update(replay_tick)
+                replayed += 1
+            except (KeyError, TypeError):
+                continue   # a malformed persisted entry must not abort the whole replay
+        if replayed:
+            print(f"Replayed {replayed} persisted candles to warm up indicators — "
+                  f"no multi-hour wait needed after this restart.")
+            if replayed >= 30:
+                self.state.indicators_warmed_up_from_replay = True
+
     def seconds_since_last_tick(self) -> float | None:
         """Wall-clock seconds since a tick last arrived, or None if none ever
         has. Used to distinguish 'market is quiet' from 'the feed is dead'."""
@@ -426,7 +476,10 @@ class LiveTradingEngine:
 
         if self.state.open_trade_manager is not None:
             self._manage_open_trade(tick, ind_result, struct_state)
-        elif self.state.tick_count > 30:  # let indicators warm up
+        elif self.state.tick_count > 30 or self.state.indicators_warmed_up_from_replay:
+            # let indicators warm up — either via 30 genuinely fresh candles
+            # this session, OR via a startup replay of persisted history
+            # (see _replay_persisted_candles_for_warmup)
             self._evaluate_new_entry(tick, ind_result, struct_state)
 
         snapshot = self._build_snapshot(tick, struct_state, ind_result)
