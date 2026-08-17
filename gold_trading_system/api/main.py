@@ -53,7 +53,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-daily-pnl-v5"
+BUILD_VERSION = "2026-08-17-tradingview-v6"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -593,6 +593,41 @@ _DASHBOARD_HTML = """
     <div class="panel-head"><h3>Daily P&amp;L (Real, After Charges)</h3></div>
     <div class="panel-body">
       <div id="dailyPnlList"><div class="empty-note">No completed trading days yet.</div></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head">
+      <h3>TradingView Reference Chart (General Market View)</h3>
+    </div>
+    <div class="panel-body" style="padding:4px;">
+      <div style="padding:8px 10px; font-size:11.5px; color:var(--text-faint);">
+        Independent reference only — TradingView's continuous MCX GOLDM contract, not
+        necessarily this system's exact next-month contract or price feed. Requires you to
+        be signed into a TradingView account in this browser for MCX data to load (MCX data
+        is registered-users-only on TradingView). Trading decisions above are based on this
+        system's own Angel One feed, not this widget.
+      </div>
+      <div class="tradingview-widget-container" style="height:450px;">
+        <div class="tradingview-widget-container__widget" style="height:100%;"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+        {
+          "autosize": true,
+          "symbol": "MCX:GOLDM1!",
+          "interval": "5",
+          "timezone": "Asia/Kolkata",
+          "theme": "dark",
+          "style": "1",
+          "locale": "in",
+          "backgroundColor": "rgba(19, 22, 26, 1)",
+          "gridColor": "rgba(28, 32, 38, 1)",
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "allow_symbol_change": false,
+          "support_host": "https://www.tradingview.com"
+        }
+        </script>
+      </div>
     </div>
   </div>
 
