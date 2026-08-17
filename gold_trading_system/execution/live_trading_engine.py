@@ -112,6 +112,14 @@ class LiveEngineState:
     # from a quiet market. Comparing this against time.time() is what makes
     # a dead feed detectable rather than silently frozen.
     last_tick_received_at: float | None = None
+    # The reference price for a meaningful, stable "change" indicator.
+    # BUGFIX: the dashboard used to compute change against the close of the
+    # most recently completed 5-minute candle, which flips sign on ordinary
+    # tick noise every few minutes regardless of the day's real trend —
+    # showing red/down even while the actual session is strongly up. Real
+    # trading platforms compare against the DAY'S OPEN (or previous close);
+    # this is set once, on the first candle of each new trading day.
+    day_open_price: float | None = None
     trade_log: list = field(default_factory=list)
     signal_log: list = field(default_factory=list)
     # bounded OHLCV history for chart display — not the full session (that
@@ -271,12 +279,19 @@ class LiveTradingEngine:
         day = datetime.fromtimestamp(tick.ts, tz=timezone.utc).date()
         if self.state.current_day is None:
             self.state.current_day = day
+            # First tick this engine has ever seen — if the service started
+            # mid-session (e.g. after a restart), this is the best available
+            # reference rather than the true session open, but it's still
+            # far more meaningful than comparing against a rolling 5-minute
+            # window.
+            self.state.day_open_price = tick.open
             return
         if day == self.state.current_day:
             return
 
         self.risk_engine.state.trades_taken_today = 0
         self.risk_engine.state.daily_pnl_inr = 0.0
+        self.state.day_open_price = tick.open
 
         if (self.risk_engine.state.trading_disabled
                 and self.cooldown_days_after_disable is not None
@@ -422,6 +437,7 @@ class LiveTradingEngine:
         tm = self.state.open_trade_manager
         return {
             "ts": tick.ts, "ltp": tick.close,
+            "day_open_price": self.state.day_open_price,
             "regime_trend": struct_state.trend.value,
             "last_structure_event": struct_state.last_event.value,
             "has_open_position": tm is not None,

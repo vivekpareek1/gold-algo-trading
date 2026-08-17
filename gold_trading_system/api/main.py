@@ -107,6 +107,7 @@ class HealthResponse(BaseModel):
 class SnapshotResponse(BaseModel):
     instrument: str
     ltp: float
+    day_open_price: float | None
     regime_trend: str
     last_structure_event: str
     has_open_position: bool
@@ -228,6 +229,7 @@ def get_snapshot():
     session = _get_market_session_status()
     return SnapshotResponse(
         instrument=settings.instrument.symbol, ltp=round(snap["ltp"], 2),
+        day_open_price=round(snap["day_open_price"], 2) if snap.get("day_open_price") else None,
         regime_trend=snap["regime_trend"], last_structure_event=snap["last_structure_event"],
         has_open_position=snap["has_open_position"], open_position=snap["open_position"],
         trading_disabled=snap["risk_state"]["trading_disabled"],
@@ -673,12 +675,19 @@ async function refresh() {
     const snapResp = await fetch('/api/snapshot');
     const snap = await snapResp.json();
 
-    const prevPrice = lastClose;
+    // BUGFIX: this used to compare against `lastClose` — the close of the
+    // most recently loaded 5-minute candle — which flips sign on ordinary
+    // tick noise every few minutes regardless of the day's real trend.
+    // A user could see red/down here while the actual session was up
+    // hundreds of points. Now compares against the DAY'S OPEN, matching
+    // what every real trading platform means by "change".
     document.getElementById('ltp').textContent = snap.ltp ? '₹' + fmt(snap.ltp) : '--';
     const changeEl = document.getElementById('change');
-    if (prevPrice !== null && snap.ltp) {
-      const diff = snap.ltp - prevPrice;
-      changeEl.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2);
+    if (snap.day_open_price && snap.ltp) {
+      const diff = snap.ltp - snap.day_open_price;
+      const pct = (diff / snap.day_open_price) * 100;
+      changeEl.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2) +
+        ' (' + (diff >= 0 ? '+' : '') + pct.toFixed(2) + '%)';
       changeEl.className = 'mono change ' + (diff > 0 ? 'bull' : diff < 0 ? 'bear' : 'flat');
     }
 
