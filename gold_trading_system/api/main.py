@@ -58,7 +58,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-support-resistance-v16"
+BUILD_VERSION = "2026-08-18-fed-treasury-v17"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -342,13 +342,14 @@ def _quote_to_dict(q):
 
 @app.get("/api/external_quotes")
 def get_external_quotes():
-    """USD/INR, COMEX Gold, Dollar Index — reference context only, entirely
-    independent of the trading feed and decisions."""
+    """USD/INR, COMEX Gold, Dollar Index, US 10Y Treasury Yield — reference
+    context only, entirely independent of the trading feed and decisions."""
     s = external_quotes_poller.state
     return {
         "usd_inr": _quote_to_dict(s.usd_inr),
         "comex_gold": _quote_to_dict(s.comex_gold),
         "dollar_index": _quote_to_dict(s.dollar_index),
+        "us_10y_treasury": _quote_to_dict(s.us_10y_treasury),
     }
 
 
@@ -591,6 +592,7 @@ _DASHBOARD_HTML = """
       <span class="mono">USD/INR <span id="refUsdInr" style="font-weight:700;">--</span></span>
       <span class="mono">COMEX Gold <span id="refComexGold" style="font-weight:700;">--</span></span>
       <span class="mono">Dollar Index <span id="refDxy" style="font-weight:700;">--</span></span>
+      <span class="mono">US 10Y Yield <span id="refTreasury" style="font-weight:700;">--</span></span>
       <span id="refStaleNote" style="color:var(--text-faint); font-size:11px; display:none;">(some values may be stale)</span>
     </div>
   </div>
@@ -865,17 +867,18 @@ async function loadExternalQuotes() {
     const data = await resp.json();
     let anyStale = false;
 
-    function render(elId, q, decimals) {
+    function render(elId, q, decimals, suffix) {
       const el = document.getElementById(elId);
       if (q.value === null) {
         el.textContent = '--';
         el.style.color = 'var(--text-faint)';
         return;
       }
+      suffix = suffix || '';
       const changeStr = q.change !== null
-        ? ' ' + (q.change >= 0 ? '▲' : '▼') + Math.abs(q.change).toFixed(decimals)
+        ? ' ' + (q.change >= 0 ? '▲' : '▼') + Math.abs(q.change).toFixed(decimals) + suffix
         : '';
-      el.textContent = q.value.toFixed(decimals) + changeStr;
+      el.textContent = q.value.toFixed(decimals) + suffix + changeStr;
       el.style.color = q.stale ? 'var(--text-faint)' : (q.change >= 0 ? 'var(--bull)' : 'var(--bear)');
       if (q.stale) anyStale = true;
     }
@@ -883,6 +886,7 @@ async function loadExternalQuotes() {
     render('refUsdInr', data.usd_inr, 2);
     render('refComexGold', data.comex_gold, 1);
     render('refDxy', data.dollar_index, 2);
+    render('refTreasury', data.us_10y_treasury, 2, '%');
 
     document.getElementById('refStaleNote').style.display = anyStale ? 'inline' : 'none';
   } catch (e) {

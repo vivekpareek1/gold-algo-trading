@@ -177,6 +177,19 @@ def test_dashboard_shows_market_context_strip():
     assert "refUsdInr" in html
     assert "refComexGold" in html
     assert "refDxy" in html
+def test_treasury_yield_ticker_configured():
+    from market_data.external_quotes import YAHOO_TICKERS
+    assert YAHOO_TICKERS["us_10y_treasury"] == "%5ETNX"
+
+
+def test_treasury_yield_fetched_alongside_others():
+    poller = ExternalQuotesPoller()
+    good_response = {"chart": {"result": [{"meta": {"regularMarketPrice": 4.22,
+                                                        "previousClose": 4.24}}]}}
+    with patch("market_data.external_quotes.requests") as mock_requests:
+        mock_requests.get.return_value = _mock_response(200, good_response)
+        poller.poll_once()
+    assert poller.state.us_10y_treasury.value == 4.22
 if __name__ == "__main__":
     tests = [
         test_parses_valid_response,
@@ -192,6 +205,8 @@ if __name__ == "__main__":
         test_correct_tickers_requested,
         test_api_endpoint_returns_all_three_quotes,
         test_dashboard_shows_market_context_strip,
+        test_treasury_yield_ticker_configured,
+        test_treasury_yield_fetched_alongside_others,
     ]
     failed = 0
     for t in tests:
@@ -206,5 +221,7 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
 
 

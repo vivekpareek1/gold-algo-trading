@@ -31,6 +31,15 @@ YAHOO_TICKERS = {
     "usd_inr": "INR=X",
     "comex_gold": "GC=F",
     "dollar_index": "DX-Y.NYB",
+    "us_10y_treasury": "%5ETNX",   # ^TNX, URL-encoded — Yahoo's ticker for
+                                     # the US 10-Year Treasury Yield, the
+                                     # most practical genuinely-live "Fed
+                                     # indicator": it moves continuously
+                                     # (unlike the Fed Funds Rate, a step
+                                     # function that only changes at FOMC
+                                     # meetings) and reflects market
+                                     # expectations for Fed policy —
+                                     # correlates meaningfully with gold.
 }
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -50,6 +59,7 @@ class ExternalQuotesState:
     usd_inr: ExternalQuote = field(default_factory=ExternalQuote)
     comex_gold: ExternalQuote = field(default_factory=ExternalQuote)
     dollar_index: ExternalQuote = field(default_factory=ExternalQuote)
+    us_10y_treasury: ExternalQuote = field(default_factory=ExternalQuote)
 
 
 def parse_yahoo_chart_response(raw_json: dict) -> tuple[float | None, float | None]:
