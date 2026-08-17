@@ -21,6 +21,7 @@ from datetime import datetime, timezone, timedelta
 from config.settings import Settings
 from execution.broker_adapters.paper_provider import PaperBrokerProvider
 from execution.live_trading_engine import LiveTradingEngine, LiveTick
+from market_data.external_quotes import ExternalQuotesPoller
 
 app = FastAPI(title="Gold Trading System API", version="0.1.0")
 
@@ -53,7 +54,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-tv-link-v8"
+BUILD_VERSION = "2026-08-17-market-context-v9"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -62,6 +63,10 @@ _tick_count = 0
 # only ever exists on the deployment server, with real credentials filled
 # in — importing it here never exposes anything to the git-tracked repo.
 LIVE_FEED_ACTIVE = False
+
+# External reference quotes — independent of the trading feed, polled every
+# 60 seconds. Display-only.
+external_quotes_poller = ExternalQuotesPoller(poll_interval_sec=60)
 try:
     from angel_one_feed import AngelOneLiveFeed
     _angel_feed = AngelOneLiveFeed(live_engine)
@@ -80,6 +85,12 @@ def start_feed():
     else:
         print("angel_one_feed.py not found — running on SIMULATED data. "
               "Place a filled-in angel_one_feed.py in this folder for real live trading.")
+
+    # External reference quotes (USD/INR, COMEX Gold, Dollar Index) — entirely
+    # separate from the trading feed above. Display-only context, never feeds
+    # into any trading decision.
+    external_quotes_poller.start_background_thread()
+    print("Started external reference quotes poller (USD/INR, COMEX Gold, DXY).")
 
 
 def _get_market_session_status() -> dict:
@@ -307,6 +318,28 @@ def get_daily_pnl():
     return {"days": live_engine.get_daily_pnl_history()}
 
 
+def _quote_to_dict(q):
+    return {
+        "value": q.value, "prev_close": q.prev_close,
+        "change": (round(q.value - q.prev_close, 4)
+                    if q.value is not None and q.prev_close is not None else None),
+        "last_updated_at": q.last_updated_at, "last_error": q.last_error,
+        "stale": q.last_error is not None,
+    }
+
+
+@app.get("/api/external_quotes")
+def get_external_quotes():
+    """USD/INR, COMEX Gold, Dollar Index — reference context only, entirely
+    independent of the trading feed and decisions."""
+    s = external_quotes_poller.state
+    return {
+        "usd_inr": _quote_to_dict(s.usd_inr),
+        "comex_gold": _quote_to_dict(s.comex_gold),
+        "dollar_index": _quote_to_dict(s.dollar_index),
+    }
+
+
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
     """Pushes a fresh snapshot every ~2 seconds. In LIVE mode this just reads
@@ -510,6 +543,16 @@ _DASHBOARD_HTML = """
       <span id="feedBadge" class="pill feed-sim"><span class="dot"></span>Loading</span>
     </div>
   </header>
+
+  <div class="panel" style="margin-bottom:16px; padding:12px 16px;">
+    <div style="display:flex; gap:28px; flex-wrap:wrap; align-items:center; font-size:12.5px;">
+      <span style="color:var(--text-faint); font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em;">Market Context</span>
+      <span class="mono">USD/INR <span id="refUsdInr" style="font-weight:700;">--</span></span>
+      <span class="mono">COMEX Gold <span id="refComexGold" style="font-weight:700;">--</span></span>
+      <span class="mono">Dollar Index <span id="refDxy" style="font-weight:700;">--</span></span>
+      <span id="refStaleNote" style="color:var(--text-faint); font-size:11px; display:none;">(some values may be stale)</span>
+    </div>
+  </div>
 
   <div id="staleWarning" style="display:none; background:rgba(194,79,66,0.16); border:1px solid rgba(194,79,66,0.5); color:var(--bear); padding:11px 14px; border-radius:8px; margin-bottom:14px; font-size:12.5px; font-weight:700;">
     ⛔ FEED STALE — no ticks received recently while the market is open. Trading has effectively stopped. Check the feed process and network.
@@ -762,6 +805,37 @@ async function loadDailyPnl() {
   }
 }
 
+async function loadExternalQuotes() {
+  try {
+    const resp = await fetch('/api/external_quotes');
+    const data = await resp.json();
+    let anyStale = false;
+
+    function render(elId, q, decimals) {
+      const el = document.getElementById(elId);
+      if (q.value === null) {
+        el.textContent = '--';
+        el.style.color = 'var(--text-faint)';
+        return;
+      }
+      const changeStr = q.change !== null
+        ? ' ' + (q.change >= 0 ? '▲' : '▼') + Math.abs(q.change).toFixed(decimals)
+        : '';
+      el.textContent = q.value.toFixed(decimals) + changeStr;
+      el.style.color = q.stale ? 'var(--text-faint)' : (q.change >= 0 ? 'var(--bull)' : 'var(--bear)');
+      if (q.stale) anyStale = true;
+    }
+
+    render('refUsdInr', data.usd_inr, 2);
+    render('refComexGold', data.comex_gold, 1);
+    render('refDxy', data.dollar_index, 2);
+
+    document.getElementById('refStaleNote').style.display = anyStale ? 'inline' : 'none';
+  } catch (e) {
+    console.error('External quotes load error:', e);
+  }
+}
+
 async function refresh() {
   try {
     const snapResp = await fetch('/api/snapshot');
@@ -862,6 +936,7 @@ async function refresh() {
 
     await loadCandleHistory();
     await loadDailyPnl();
+    await loadExternalQuotes();
 
     document.getElementById('status').textContent = 'Last updated ' + new Date().toLocaleTimeString();
   } catch (e) {
