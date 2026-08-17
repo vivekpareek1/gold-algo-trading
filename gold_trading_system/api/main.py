@@ -53,7 +53,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-tradingview-v6"
+BUILD_VERSION = "2026-08-17-tv-resize-v7"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -608,8 +608,8 @@ _DASHBOARD_HTML = """
         is registered-users-only on TradingView). Trading decisions above are based on this
         system's own Angel One feed, not this widget.
       </div>
-      <div class="tradingview-widget-container" style="height:450px;">
-        <div class="tradingview-widget-container__widget" style="height:100%;"></div>
+      <div class="tradingview-widget-container" style="height:600px; width:100%;">
+        <div class="tradingview-widget-container__widget" style="height:100%; width:100%;"></div>
         <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
         {
           "autosize": true,
@@ -624,6 +624,8 @@ _DASHBOARD_HTML = """
           "hide_top_toolbar": false,
           "hide_legend": false,
           "allow_symbol_change": false,
+          "width": "100%",
+          "height": "100%",
           "support_host": "https://www.tradingview.com"
         }
         </script>
