@@ -570,7 +570,20 @@ function initChart() {
   document.getElementById('chartEmpty').style.display = 'none';
   document.getElementById('chartWrap').style.display = 'block';
 
-  chart = LightweightCharts.createChart(document.getElementById('chart'), {
+  // BUGFIX: createChart() was never given an explicit width. Without it,
+  // lightweight-charts measures the container at the instant this code
+  // runs — which can be BEFORE the browser has finished resolving the
+  // CSS grid/flex layout around it, especially on first paint. The result:
+  // the chart initializes at 0 (or wrong) width, so the price axis (which
+  // has its own fixed-width area) still renders, but the actual candle-
+  // drawing canvas collapses and nothing visible gets drawn. Fixed by
+  // reading the real, already-laid-out container width, and keeping it in
+  // sync on resize.
+  const chartContainer = document.getElementById('chart');
+  const volumeContainer = document.getElementById('volume');
+
+  chart = LightweightCharts.createChart(chartContainer, {
+    width: chartContainer.clientWidth,
     height: 340,
     layout: { background: { color: 'transparent' }, textColor: '#9198A3', fontFamily: 'JetBrains Mono, monospace' },
     grid: { vertLines: { color: '#1C2026' }, horzLines: { color: '#1C2026' } },
@@ -585,7 +598,8 @@ function initChart() {
     wickUpColor: '#3FA796', wickDownColor: '#C24F42',
   });
 
-  volumeChart = LightweightCharts.createChart(document.getElementById('volume'), {
+  volumeChart = LightweightCharts.createChart(volumeContainer, {
+    width: volumeContainer.clientWidth,
     height: 70,
     layout: { background: { color: 'transparent' }, textColor: '#565C68', fontFamily: 'JetBrains Mono, monospace' },
     grid: { vertLines: { color: 'transparent' }, horzLines: { color: 'transparent' } },
@@ -598,6 +612,18 @@ function initChart() {
     if (range) volumeChart.timeScale().setVisibleLogicalRange(range);
   });
 
+  // Keep both charts sized correctly as the viewport changes (rotation,
+  // resize, or a layout shift after fonts/webfonts finish loading) —
+  // without this, the SAME collapse could recur on any relayout.
+  window.addEventListener('resize', () => {
+    if (chart && chartContainer.clientWidth > 0) {
+      chart.applyOptions({ width: chartContainer.clientWidth });
+    }
+    if (volumeChart && volumeContainer.clientWidth > 0) {
+      volumeChart.applyOptions({ width: volumeContainer.clientWidth });
+    }
+  });
+
   chartInitialized = true;
 }
 
@@ -606,16 +632,39 @@ async function loadCandleHistory() {
   const data = await resp.json();
   if (data.candles && data.candles.length > 0) {
     if (!chartInitialized) initChart();
-    const candles = data.candles.map(c => ({ time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close }));
-    const vols = data.candles.map(c => ({
+
+    // Defensive: lightweight-charts REQUIRES strictly ascending, unique
+    // timestamps in setData() — any violation throws, and that exception
+    // used to be swallowed into a generic "Connection error" status with
+    // no indication the chart itself was the cause. Sort + dedupe here so
+    // a single overlapping tick (e.g. around a feed reconnect) can't
+    // silently blank the whole chart, and surface a specific error if
+    // setData still fails for any other reason.
+    const seen = new Set();
+    const sorted = [...data.candles]
+      .sort((a, b) => a.ts - b.ts)
+      .filter(c => {
+        if (seen.has(c.ts)) return false;
+        seen.add(c.ts);
+        return true;
+      });
+
+    const candles = sorted.map(c => ({ time: c.ts, open: c.open, high: c.high, low: c.low, close: c.close }));
+    const vols = sorted.map(c => ({
       time: c.ts, value: c.volume,
       color: c.close >= c.open ? 'rgba(63,167,150,0.55)' : 'rgba(194,79,66,0.55)',
     }));
-    candleSeries.setData(candles);
-    volumeSeries.setData(vols);
-    lastClose = candles[candles.length - 1].close;
-    chart.timeScale().fitContent();
-    volumeChart.timeScale().fitContent();
+
+    try {
+      candleSeries.setData(candles);
+      volumeSeries.setData(vols);
+      lastClose = candles[candles.length - 1].close;
+      chart.timeScale().fitContent();
+      volumeChart.timeScale().fitContent();
+    } catch (e) {
+      console.error('Chart render error:', e, 'candle count:', candles.length);
+      document.getElementById('status').textContent = 'Chart render error: ' + e.message;
+    }
   }
 }
 
