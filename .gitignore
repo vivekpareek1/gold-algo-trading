@@ -8,3 +8,4 @@ angel_one_feed.py
 *.sqlite3
 *.csv
 *.jsonl
+candle_history.jsonl

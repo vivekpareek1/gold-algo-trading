@@ -17,7 +17,7 @@ from execution.broker_adapters.paper_provider import PaperBrokerProvider
 def _engine():
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None), broker
+    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None), broker
 
 
 def test_day_open_price_set_on_first_tick():

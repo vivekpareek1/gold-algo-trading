@@ -42,7 +42,10 @@ broker.connect()
 # persistence entirely (used by tests that want zero disk side effects).
 _persistence_env = os.environ.get("TRADE_HISTORY_PATH", "trade_history.jsonl")
 _persistence_path = _persistence_env if _persistence_env else None
-live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=_persistence_path)
+_candle_persistence_env = os.environ.get("CANDLE_HISTORY_PATH", "candle_history.jsonl")
+_candle_persistence_path = _candle_persistence_env if _candle_persistence_env else None
+live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=_persistence_path,
+                                   candle_persistence_path=_candle_persistence_path)
 
 # BUGFIX (process/deploy issue, not code logic): repeated confusion over
 # whether a deploy actually took effect — the dashboard would show stale
@@ -50,7 +53,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-brokerage-v2"
+BUILD_VERSION = "2026-08-17-candle-persist-v3"
 
 _last_price = 63000.0
 _tick_count = 0

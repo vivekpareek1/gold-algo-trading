@@ -11,7 +11,7 @@ def make_engine(settings=None):
     settings = settings or Settings()
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=None)
+    engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None)
     return engine, broker
 
 

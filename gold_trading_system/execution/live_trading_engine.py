@@ -148,7 +148,8 @@ class LiveTradingEngine:
 
     def __init__(self, config, broker: BrokerProvider, symbol: str = "GOLDM",
                  htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1,
-                 persistence_path: str | None = "trade_history.jsonl"):
+                 persistence_path: str | None = "trade_history.jsonl",
+                 candle_persistence_path: str | None = "candle_history.jsonl"):
         self.config = config
         self.broker = broker
         self.symbol = symbol
@@ -170,6 +171,7 @@ class LiveTradingEngine:
         # on startup so history survives restarts. None disables persistence
         # entirely (used by tests, which should not touch disk).
         self.persistence_path = Path(persistence_path) if persistence_path else None
+        self.candle_persistence_path = Path(candle_persistence_path) if candle_persistence_path else None
 
         self.structure = MarketStructureEngine()
         self.indicators = IndicatorEngine()
@@ -181,6 +183,7 @@ class LiveTradingEngine:
 
         self.state = LiveEngineState()
         self._load_persisted_trades()
+        self._load_persisted_candles()
 
     def _load_persisted_trades(self):
         """
@@ -223,6 +226,42 @@ class LiveTradingEngine:
         except OSError as e:
             print(f"Warning: could not persist trade to disk: {type(e).__name__}: {e}")
 
+    def _load_persisted_candles(self):
+        """Same rationale as trade persistence: without this, EVERY service
+        restart (and there were many during active development) wiped the
+        chart back to empty, making it look broken even though the
+        underlying pipeline was fine — there was just never enough
+        uninterrupted runtime to accumulate more than 1-2 candles."""
+        if self.candle_persistence_path is None or not self.candle_persistence_path.exists():
+            return
+        loaded, skipped = 0, 0
+        try:
+            with open(self.candle_persistence_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self.state.candle_history.append(json.loads(line))
+                        loaded += 1
+                    except json.JSONDecodeError:
+                        skipped += 1
+            self.state.candle_history = self.state.candle_history[-self.state.max_candle_history:]
+        except OSError as e:
+            print(f"Warning: could not read persisted candle history: {type(e).__name__}: {e}")
+            return
+        if loaded:
+            print(f"Loaded {loaded} persisted candles" + (f", skipped {skipped} corrupted" if skipped else ""))
+
+    def _persist_candle(self, candle: dict):
+        if self.candle_persistence_path is None:
+            return
+        try:
+            with open(self.candle_persistence_path, "a") as f:
+                f.write(json.dumps(candle) + "\n")
+        except OSError as e:
+            print(f"Warning: could not persist candle to disk: {type(e).__name__}: {e}")
+
     def seconds_since_last_tick(self) -> float | None:
         """Wall-clock seconds since a tick last arrived, or None if none ever
         has. Used to distinguish 'market is quiet' from 'the feed is dead'."""
@@ -253,10 +292,12 @@ class LiveTradingEngine:
         self._handle_day_boundary(tick)
 
         # record candle history for chart display, bounded to avoid unbounded growth
-        self.state.candle_history.append({
+        new_candle = {
             "ts": tick.ts, "open": tick.open, "high": tick.high,
             "low": tick.low, "close": tick.close, "volume": tick.volume,
-        })
+        }
+        self.state.candle_history.append(new_candle)
+        self._persist_candle(new_candle)
         if len(self.state.candle_history) > self.state.max_candle_history:
             self.state.candle_history = self.state.candle_history[-self.state.max_candle_history:]
 

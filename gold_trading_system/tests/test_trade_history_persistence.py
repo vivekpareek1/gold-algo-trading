@@ -16,7 +16,8 @@ from tests.test_backtest_runner import make_synthetic_trending_candles
 def _engine_with_persistence(path):
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=path)
+    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=path,
+                               candle_persistence_path=None)
 
 
 def test_no_persistence_file_on_first_run():
@@ -84,7 +85,7 @@ def test_persistence_disabled_when_path_is_none():
     """Tests and short-lived sessions must be able to opt out of touching disk."""
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    engine = LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None)
+    engine = LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None)
     candles = make_synthetic_trending_candles(n=500, drift=3.0, noise=10.0, seed=7)
     for c in candles:
         engine.on_tick(LiveTick(ts=c.ts, open=c.open, high=c.high, low=c.low,

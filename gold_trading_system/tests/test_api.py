@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 # found during final pre-launch review: test pollution risking mixing test
 # data with genuine live trading history if tests ever ran alongside it).
 os.environ["TRADE_HISTORY_PATH"] = ""
+os.environ["CANDLE_HISTORY_PATH"] = ""
 
 from fastapi.testclient import TestClient
 from api.main import app
