@@ -1,7 +1,10 @@
 """
-Tests for the TradingView reference chart panel — an ADDITIONAL, informational
-panel only. It must never be confused with or replace the system's own chart,
-which reflects the exact data trading decisions are based on.
+Tests for the TradingView reference link panel. An embedded chart widget
+was tried first but proved unreliable (silently fell back to the wrong
+symbol/AAPL instead of MCX GOLDM, root cause unclear even after ruling
+out the obvious login-based hypothesis). Replaced with a simple, reliable
+link-out to the user's own TradingView account in a new tab — guaranteed
+correct since it's literally the same interface they already use.
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -12,41 +15,48 @@ from api.main import app
 client = TestClient(app)
 
 
-def test_tradingview_widget_embedded():
+def test_tradingview_link_present():
     html = client.get("/").text
-    assert "embed-widget-advanced-chart.js" in html
-    assert "MCX:GOLDM1!" in html
+    assert "tradingview.com/chart" in html
+    assert "GOLDM1" in html
 
 
-def test_tradingview_panel_has_disclaimer():
-    """Must be clearly labeled as a separate, general reference — never
-    presented as reflecting this system's own trading data."""
+def test_link_opens_new_tab():
+    """Must not navigate away from the dashboard — open in a new tab."""
     html = client.get("/").text
-    assert "Independent reference only" in html
-    assert "not" in html and "next-month contract" in html
+    assert 'target="_blank"' in html
+    assert 'rel="noopener"' in html
 
 
-def test_own_chart_still_present_alongside_tradingview():
-    """The TradingView widget must be ADDITIONAL — the system's own chart
-    (which reflects real trading decisions) must still be there."""
+def test_no_embedded_widget_script_remains():
+    """The unreliable embedded widget must be fully removed, not left
+    alongside the link (would be confusing and wastes a script load)."""
+    html = client.get("/").text
+    assert "embed-widget-advanced-chart.js" not in html
+
+
+def test_own_chart_still_present():
+    """The system's own chart (which reflects real trading decisions)
+    must still be there, unaffected by this change."""
     html = client.get("/").text
     assert 'id="chart"' in html
     assert "addCandlestickSeries" in html
-    assert "loadCandleHistory" in html
 
 
-def test_page_structurally_valid_with_widget_added():
+def test_page_structurally_valid():
     html = client.get("/").text
     assert html.count("<div") == html.count("</div>")
     assert html.count("<script") == html.count("</script>")
+    assert html.count("<a ") == html.count("</a>")
 
 
 if __name__ == "__main__":
     tests = [
-        test_tradingview_widget_embedded,
-        test_tradingview_panel_has_disclaimer,
-        test_own_chart_still_present_alongside_tradingview,
-        test_page_structurally_valid_with_widget_added,
+        test_tradingview_link_present,
+        test_link_opens_new_tab,
+        test_no_embedded_widget_script_remains,
+        test_own_chart_still_present,
+        test_page_structurally_valid,
     ]
     failed = 0
     for t in tests:

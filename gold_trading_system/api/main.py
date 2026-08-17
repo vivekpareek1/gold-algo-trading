@@ -53,7 +53,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-17-tv-resize-v7"
+BUILD_VERSION = "2026-08-17-tv-link-v8"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -598,38 +598,21 @@ _DASHBOARD_HTML = """
 
   <div class="panel" style="margin-top:16px;">
     <div class="panel-head">
-      <h3>TradingView Reference Chart (General Market View)</h3>
+      <h3>TradingView Reference Chart</h3>
     </div>
-    <div class="panel-body" style="padding:4px;">
-      <div style="padding:8px 10px; font-size:11.5px; color:var(--text-faint);">
-        Independent reference only — TradingView's continuous MCX GOLDM contract, not
-        necessarily this system's exact next-month contract or price feed. Requires you to
-        be signed into a TradingView account in this browser for MCX data to load (MCX data
-        is registered-users-only on TradingView). Trading decisions above are based on this
-        system's own Angel One feed, not this widget.
+    <div class="panel-body">
+      <div style="padding:4px 2px 14px; font-size:11.5px; color:var(--text-faint); line-height:1.5;">
+        Independent reference only — an embedded widget proved unreliable (kept showing the
+        wrong symbol), so this opens your own real TradingView chart in a new tab instead —
+        exactly what you already use, no embedding issues. Trading decisions in this dashboard
+        are based on this system's own Angel One feed, not TradingView's.
       </div>
-      <div class="tradingview-widget-container" style="height:600px; width:100%;">
-        <div class="tradingview-widget-container__widget" style="height:100%; width:100%;"></div>
-        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-        {
-          "autosize": true,
-          "symbol": "MCX:GOLDM1!",
-          "interval": "5",
-          "timezone": "Asia/Kolkata",
-          "theme": "dark",
-          "style": "1",
-          "locale": "in",
-          "backgroundColor": "rgba(19, 22, 26, 1)",
-          "gridColor": "rgba(28, 32, 38, 1)",
-          "hide_top_toolbar": false,
-          "hide_legend": false,
-          "allow_symbol_change": false,
-          "width": "100%",
-          "height": "100%",
-          "support_host": "https://www.tradingview.com"
-        }
-        </script>
-      </div>
+      <a href="https://www.tradingview.com/chart/?symbol=MCX%3AGOLDM1%21" target="_blank" rel="noopener"
+         style="display:inline-flex; align-items:center; gap:8px; padding:10px 18px; border-radius:8px;
+                background: var(--panel-2); border: 1px solid var(--panel-border); color: var(--gold-soft);
+                text-decoration:none; font-size:13px; font-weight:600;">
+        Open GOLDM chart on TradingView ↗
+      </a>
     </div>
   </div>
 
