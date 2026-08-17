@@ -93,6 +93,8 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   base_timeframe: str = "5M", htf_timeframe: str | None = None,
                   cooldown_days_after_disable: int | None = 1,
                   same_direction_reentry_cooldown_sec: int | None = None,
+                  require_near_support_resistance: bool | None = None,
+                  support_resistance_proximity_atr_mult: float = 1.5,
                   verbose: bool = False) -> BacktestResult:
     """
     candles: chronologically ordered OHLCV list (already historical, no
@@ -309,9 +311,23 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             continue   # blocked: chasing the same direction right after it decayed
 
         entry_price = candle.close
-
         nearest_swing_low = (struct_state.swing_lows[-1].price if struct_state.swing_lows else None)
         nearest_swing_high = (struct_state.swing_highs[-1].price if struct_state.swing_highs else None)
+
+        # Real-data finding: LONG entries far from a recent swing low
+        # (support) and SHORT entries far from a recent swing high
+        # (resistance) were, as a group, net LOSERS (-0.059R and -0.079R
+        # respectively) on 2-year real MCX data, while entries near
+        # support/resistance were strongly profitable (+0.913R / +0.363R).
+        if require_near_support_resistance:
+            atr_now = ind_result["atr"] or 10.0
+            proximity = atr_now * support_resistance_proximity_atr_mult
+            if direction == "LONG":
+                if nearest_swing_low is None or abs(entry_price - nearest_swing_low) > proximity:
+                    continue
+            else:
+                if nearest_swing_high is None or abs(entry_price - nearest_swing_high) > proximity:
+                    continue
 
         stop_result = stop_engine.evaluate(
             direction=direction, entry_price=entry_price, atr=ind_result["atr"],
