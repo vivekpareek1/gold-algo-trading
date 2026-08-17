@@ -164,6 +164,30 @@ class BollingerBandsState:
         return self.upper, self.mid, self.lower
 
 
+def momentum_health_from_indicator_result(ind_result: dict) -> str:
+    """
+    Classifies momentum as STRONG / WEAKENING / DEAD from an IndicatorEngine
+    update() result dict, for trailing-stop-method selection and exit
+    decisions (trade_manager consumers).
+
+    SINGLE SOURCE OF TRUTH: this used to be independently copy-pasted into
+    both backtest_runner.py and live_trading_engine.py. Identical today,
+    but two live copies of the same decision logic is exactly the kind of
+    thing that silently diverges after a fix lands in one place and not the
+    other — paper trading would then quietly behave differently from what
+    was backtested, with no error to catch it. Both now import this.
+
+    Note: this is deliberately simpler than SituationAnalyzer._momentum_health
+    (a 3-factor regime-classification read using ATR-relative EMA
+    separation) — that is a different, intentional consumer with different
+    needs, not a duplicate of this one.
+    """
+    macd_accel = abs(ind_result["macd_hist"]) > abs(ind_result["macd_hist_prev"])
+    volume_ok = ind_result["rel_volume"] >= 1.0
+    score = sum([macd_accel, volume_ok])
+    return "STRONG" if score == 2 else ("WEAKENING" if score == 1 else "DEAD")
+
+
 class IndicatorEngine:
     """
     One instance per (instrument, timeframe) pair.

@@ -1,6 +1,14 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# MUST be set before importing api.main — that module instantiates a global
+# live_engine at import time, and without this, test runs silently write
+# real trade-history file artifacts into the repo directory (a real bug
+# found during final pre-launch review: test pollution risking mixing test
+# data with genuine live trading history if tests ever ran alongside it).
+os.environ["TRADE_HISTORY_PATH"] = ""
+os.environ["CANDLE_HISTORY_PATH"] = ""
+
 from fastapi.testclient import TestClient
 from api.main import app
 

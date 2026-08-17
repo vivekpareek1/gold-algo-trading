@@ -60,7 +60,7 @@ def test_live_engine_builds_a_real_htf_trend():
     settings = Settings()
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    engine = LiveTradingEngine(settings, broker, symbol="GOLDM")
+    engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None)
 
     assert engine.htf_aggregator is not None, \
         "With no external lookup supplied, the engine must build its own HTF trend"
@@ -119,7 +119,7 @@ def test_day_boundary_advances_with_real_timestamps():
     settings = Settings()
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    engine = LiveTradingEngine(settings, broker, symbol="GOLDM")
+    engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None)
 
     day1 = 1735689600            # a real epoch timestamp
     day2 = day1 + 86400          # exactly one day later
@@ -138,7 +138,7 @@ def test_trade_log_is_bounded():
     settings = Settings()
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    engine = LiveTradingEngine(settings, broker, symbol="GOLDM")
+    engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None)
     # simulate an already very long-running session
     engine.state.trade_log = [{"r_multiple": 0.1} for _ in range(5000)]
     engine.state.trade_log = engine.state.trade_log[-1000:]
