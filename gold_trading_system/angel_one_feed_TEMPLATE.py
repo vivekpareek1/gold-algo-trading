@@ -155,7 +155,7 @@ class AngelOneLiveFeed:
     def _on_close(self, wsapp):
         print("WebSocket closed.")
 
-    def run_forever(self, max_backoff_sec: int = 60):
+    def run_forever(self, max_backoff_sec: int = 300, rate_limit_cooldown_sec: int = 300):
         """
         Blocking call — run this in a dedicated thread if alongside FastAPI.
 
@@ -164,6 +164,17 @@ class AngelOneLiveFeed:
         exit, and nothing anywhere would notice — the dashboard kept showing
         a green LIVE badge over frozen prices. For a system meant to run
         unattended for weeks, a dead feed must never look like a quiet market.
+
+        BUGFIX (real incident): a rate-limit ban ("Access denied because of
+        exceeding access rate") took ~3.5 hours to clear while backoff was
+        capped at 60s — meaning hundreds of retries hammered the same
+        rate-limited endpoint the whole time. Many APIs count repeated
+        failed attempts within their rate-limit window, so aggressive
+        retrying can itself PROLONG a ban rather than waiting it out. Now:
+        max_backoff_sec raised to 5 minutes, AND a rate-limit-specific error
+        jumps straight to a full cooldown rather than the normal doubling
+        progression — gentler on the API when it's explicitly telling us
+        to back off.
         """
         backoff = 1
         while not self._stop_requested:
@@ -173,7 +184,13 @@ class AngelOneLiveFeed:
                 backoff = 1   # a successful connect resets the backoff
                 self.ws.connect()   # blocks until the socket closes
             except Exception as e:
-                print(f"Feed connection error: {type(e).__name__}: {e}")
+                error_text = f"{type(e).__name__}: {e}"
+                print(f"Feed connection error: {error_text}")
+                if "exceeding access rate" in error_text.lower() or "access denied" in error_text.lower():
+                    backoff = rate_limit_cooldown_sec
+                    print(f"Rate-limit error detected — jumping straight to a "
+                          f"{rate_limit_cooldown_sec}s cooldown instead of the normal "
+                          f"backoff progression, to avoid extending the ban.")
 
             if self._stop_requested:
                 break
