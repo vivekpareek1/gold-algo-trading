@@ -44,6 +44,14 @@ _persistence_env = os.environ.get("TRADE_HISTORY_PATH", "trade_history.jsonl")
 _persistence_path = _persistence_env if _persistence_env else None
 live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_path=_persistence_path)
 
+# BUGFIX (process/deploy issue, not code logic): repeated confusion over
+# whether a deploy actually took effect — the dashboard would show stale
+# behavior with no visible way to confirm from a screenshot whether new
+# code was actually running. This string changes with every deploy, shown
+# prominently in the footer, so it is now immediately, unambiguously
+# checkable from a screenshot rather than inferred from subtle UI details.
+BUILD_VERSION = "2026-08-17-brokerage-v2"
+
 _last_price = 63000.0
 _tick_count = 0
 
@@ -93,6 +101,7 @@ class HealthResponse(BaseModel):
     mode: str
     broker_connected: bool
     data_feed: str
+    build_version: str
     # True when the live feed has delivered no volume at all — the signature
     # of subscribing in a mode that carries none. Surfaced here so the
     # dashboard can show it; a silent detector nobody reads is no safety net.
@@ -189,7 +198,7 @@ def health():
         data_feed="ANGEL_ONE_LIVE" if LIVE_FEED_ACTIVE else "PAPER_SIMULATED",
         volume_feed_broken=volume_broken,
         seconds_since_last_tick=round(since, 1) if since is not None else None,
-        feed_stale=stale,
+        feed_stale=stale, build_version=BUILD_VERSION,
     )
 
 
@@ -305,8 +314,11 @@ async def websocket_live(websocket: WebSocket):
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     """Simple self-refreshing HTML dashboard — no separate frontend build
-    or hosting needed, just open http://<server-ip>:<port>/ in a browser."""
-    return _DASHBOARD_HTML
+    or hosting needed, just open http://<server-ip>:<port>/ in a browser.
+    The build version is substituted server-side (not via JS) so it's
+    visible even if something else client-side is broken — the whole point
+    is to make "is my latest code actually running" checkable at a glance."""
+    return _DASHBOARD_HTML.replace("__BUILD_VERSION__", BUILD_VERSION)
 
 
 _DASHBOARD_HTML = """
@@ -557,7 +569,7 @@ _DASHBOARD_HTML = """
   </div>
 
   <footer>
-    <span><span class="dot-live"></span>Auto-refresh: 5s</span>
+    <span><span class="dot-live"></span>Auto-refresh: 5s · Build: __BUILD_VERSION__</span>
     <span id="status">Connecting...</span>
   </footer>
 
