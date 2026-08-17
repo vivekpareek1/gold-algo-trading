@@ -24,7 +24,9 @@ from indicators.incremental import IndicatorEngine, momentum_health_from_indicat
 from situation_analysis.situation_analyzer import SituationAnalyzer, IndicatorSnapshot, MacroContext
 from signal_engine.signal_engine import SignalEngine, ConfluenceInputs, Decision
 from risk_engine.risk_engine import RiskEngine, DailyRiskState
-from trade_manager.trade_manager import TradeManager, TradeManagerState
+from trade_manager.trade_manager import (
+    TradeManager, TradeManagerState, TradeState, ExitReason, StateTransition, TrailUpdate
+)
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
 from execution.broker_adapters.base import BrokerProvider, OrderRequest, OrderSide
 from execution.brokerage_calculator import calculate_charges
@@ -166,7 +168,8 @@ class LiveTradingEngine:
     def __init__(self, config, broker: BrokerProvider, symbol: str = "GOLDM",
                  htf_timeframe_lookup=None, cooldown_days_after_disable: int | None = 1,
                  persistence_path: str | None = "trade_history.jsonl",
-                 candle_persistence_path: str | None = "candle_history.jsonl"):
+                 candle_persistence_path: str | None = "candle_history.jsonl",
+                 open_position_path: str | None = "open_position.json"):
         self.config = config
         self.broker = broker
         self.symbol = symbol
@@ -189,6 +192,7 @@ class LiveTradingEngine:
         # entirely (used by tests, which should not touch disk).
         self.persistence_path = Path(persistence_path) if persistence_path else None
         self.candle_persistence_path = Path(candle_persistence_path) if candle_persistence_path else None
+        self.open_position_path = Path(open_position_path) if open_position_path else None
 
         self.structure = MarketStructureEngine()
         self.indicators = IndicatorEngine()
@@ -202,6 +206,7 @@ class LiveTradingEngine:
         self._load_persisted_trades()
         self._load_persisted_candles()
         self._replay_persisted_candles_for_warmup()
+        self._load_persisted_open_position()
 
     def _load_persisted_trades(self):
         """
@@ -334,6 +339,132 @@ class LiveTradingEngine:
                 f.write(json.dumps(candle) + "\n")
         except OSError as e:
             print(f"Warning: could not persist candle to disk: {type(e).__name__}: {e}")
+
+    def _persist_open_position(self):
+        """
+        Writes the CURRENT open trade's full state to disk — called after
+        opening, and after every trailing-stop/partial-booking update, so
+        the persisted snapshot is always current. Without this, a service
+        restart while a position was open silently lost it entirely: not
+        just the P&L outcome, but risk-engine's position-open tracking and
+        the broker's margin/equity bookkeeping went out of sync too (a
+        real incident — a genuine open trade vanished on restart with no
+        record of its eventual outcome).
+        """
+        if self.open_position_path is None or self.state.open_trade_manager is None:
+            return
+        tm_state = self.state.open_trade_manager.state
+        bundle = {
+            "trade_manager_state": {
+                "trade_state": tm_state.trade_state.value,
+                "direction": tm_state.direction,
+                "entry_price": tm_state.entry_price,
+                "original_stop": tm_state.original_stop,
+                "current_stop": tm_state.current_stop,
+                "original_risk_points": tm_state.original_risk_points,
+                "quantity_remaining_pct": tm_state.quantity_remaining_pct,
+                "booked_at_1R": tm_state.booked_at_1R,
+                "booked_at_t1": tm_state.booked_at_t1,
+                "booked_at_t2": tm_state.booked_at_t2,
+                "target_1": tm_state.target_1,
+                "target_2": tm_state.target_2,
+                "target_3": tm_state.target_3,
+                "state_history": [
+                    {"from_state": h.from_state.value, "to_state": h.to_state.value,
+                      "trigger_reason": h.trigger_reason, "price_at_event": h.price_at_event}
+                    for h in tm_state.state_history
+                ],
+                "trail_history": [
+                    {"old_stop": h.old_stop, "new_stop": h.new_stop,
+                      "method_used": h.method_used, "reason": h.reason}
+                    for h in tm_state.trail_history
+                ],
+                "exit_reason": tm_state.exit_reason.value,
+                "realized_legs": [list(leg) for leg in tm_state.realized_legs],
+            },
+            "entry_regime": self.state.open_trade_entry_regime,
+            "lots": self.state.open_trade_lots,
+            "margin_used_inr": self.broker.get_balance().margin_used_inr,
+            "equity_inr": self.broker.get_balance().equity_inr,
+        }
+        try:
+            with open(self.open_position_path, "w") as f:
+                json.dump(bundle, f)
+        except OSError as e:
+            print(f"Warning: could not persist open position: {type(e).__name__}: {e}")
+
+    def _clear_persisted_open_position(self):
+        """Called the moment a trade closes — a stale open-position file
+        left behind after the real trade closed would cause the NEXT
+        restart to wrongly resurrect a position that no longer exists."""
+        if self.open_position_path is None:
+            return
+        try:
+            if self.open_position_path.exists():
+                self.open_position_path.unlink()
+        except OSError as e:
+            print(f"Warning: could not clear persisted open position: {type(e).__name__}: {e}")
+
+    def _load_persisted_open_position(self):
+        """
+        Restores an open trade's full state on startup, including
+        re-syncing the broker's position/margin/equity bookkeeping —
+        WITHOUT re-charging commission or slippage, since the original
+        entry already did that before the restart (see
+        PaperBrokerProvider.restore_position).
+        """
+        if self.open_position_path is None or not self.open_position_path.exists():
+            return
+        try:
+            with open(self.open_position_path) as f:
+                bundle = json.load(f)
+
+            tms_data = bundle["trade_manager_state"]
+            state_history = [
+                StateTransition(from_state=TradeState(h["from_state"]),
+                                  to_state=TradeState(h["to_state"]),
+                                  trigger_reason=h["trigger_reason"],
+                                  price_at_event=h["price_at_event"])
+                for h in tms_data["state_history"]
+            ]
+            trail_history = [
+                TrailUpdate(old_stop=h["old_stop"], new_stop=h["new_stop"],
+                              method_used=h["method_used"], reason=h["reason"])
+                for h in tms_data["trail_history"]
+            ]
+            tm_state = TradeManagerState(
+                trade_state=TradeState(tms_data["trade_state"]),
+                direction=tms_data["direction"], entry_price=tms_data["entry_price"],
+                original_stop=tms_data["original_stop"], current_stop=tms_data["current_stop"],
+                original_risk_points=tms_data["original_risk_points"],
+                quantity_remaining_pct=tms_data["quantity_remaining_pct"],
+                booked_at_1R=tms_data["booked_at_1R"], booked_at_t1=tms_data["booked_at_t1"],
+                booked_at_t2=tms_data["booked_at_t2"],
+                target_1=tms_data["target_1"], target_2=tms_data["target_2"],
+                target_3=tms_data["target_3"], state_history=state_history,
+                trail_history=trail_history, exit_reason=ExitReason(tms_data["exit_reason"]),
+                realized_legs=[tuple(leg) for leg in tms_data["realized_legs"]],
+            )
+
+            self.state.open_trade_manager = TradeManager(self.config, tm_state)
+            self.state.open_trade_entry_regime = bundle["entry_regime"]
+            self.state.open_trade_lots = bundle["lots"]
+
+            signed_qty = bundle["lots"] * (1 if tm_state.direction == "LONG" else -1)
+            if hasattr(self.broker, "restore_position"):
+                self.broker.restore_position(
+                    symbol=self.symbol, quantity=signed_qty, avg_price=tm_state.entry_price,
+                    margin_used_inr=bundle["margin_used_inr"], equity_inr=bundle["equity_inr"],
+                )
+            self.risk_engine.register_position_opened()
+
+            print(f"RESTORED open position from disk: {tm_state.direction} @ "
+                  f"{tm_state.entry_price}, stop={tm_state.current_stop}, "
+                  f"state={tm_state.trade_state.value} — trade management resumes normally.")
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"Warning: could not restore persisted open position "
+                  f"({type(e).__name__}: {e}) — starting with no open position. "
+                  f"If a trade was genuinely open, its outcome will not be tracked.")
 
     def _replay_persisted_candles_for_warmup(self):
         """
@@ -568,6 +699,12 @@ class LiveTradingEngine:
         if tm.state.trade_state.value != "EXITED":
             tm.check_stop_hit_intrabar(high=tick.high, low=tick.low, close=tick.close)
 
+        if tm.state.trade_state.value != "EXITED":
+            # trade is still open — persist the UPDATED state (trailed stop,
+            # any partial booking) so a restart resumes from here, not from
+            # the original entry parameters
+            self._persist_open_position()
+
         if tm.state.trade_state.value == "EXITED":
             exit_price = (tm.state.state_history[-1].price_at_event
                           if tm.state.state_history else tick.close)
@@ -600,6 +737,7 @@ class LiveTradingEngine:
             self.risk_engine.register_position_closed()
             self.state.open_trade_manager = None
             self.state.open_trade_entry_regime = None
+            self._clear_persisted_open_position()
 
     # ---------- evaluating a new entry ----------
     def _evaluate_new_entry(self, tick: LiveTick, ind_result: dict, struct_state):
@@ -713,6 +851,7 @@ class LiveTradingEngine:
         self.state.open_trade_entry_regime = situation.regime.value
         self.state.open_trade_lots = sizing.lots
         self.risk_engine.register_position_opened()
+        self._persist_open_position()
 
     def _build_snapshot(self, tick: LiveTick, struct_state, ind_result: dict) -> dict:
         tm = self.state.open_trade_manager

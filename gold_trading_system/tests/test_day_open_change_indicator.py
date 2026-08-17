@@ -9,6 +9,15 @@ what real trading platforms mean by "change".
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# MUST be set before any import of api.main — that module builds a global
+# live_engine at import time using these env vars (default: real file
+# names), and this test file imports api.main independently. Without this,
+# running this file in isolation leaves stray candle_history.jsonl /
+# trade_history.jsonl / open_position.json artifacts in the repo directory.
+os.environ.setdefault("TRADE_HISTORY_PATH", "")
+os.environ.setdefault("CANDLE_HISTORY_PATH", "")
+os.environ.setdefault("OPEN_POSITION_PATH", "")
+
 from config.settings import Settings
 from execution.live_trading_engine import LiveTradingEngine, LiveTick
 from execution.broker_adapters.paper_provider import PaperBrokerProvider
@@ -17,7 +26,7 @@ from execution.broker_adapters.paper_provider import PaperBrokerProvider
 def _engine():
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None), broker
+    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None, open_position_path=None), broker
 
 
 def test_day_open_price_set_on_first_tick():

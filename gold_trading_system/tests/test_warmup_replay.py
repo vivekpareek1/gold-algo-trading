@@ -19,7 +19,8 @@ def _engine(candle_path=None):
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
     return LiveTradingEngine(Settings(), broker, symbol="GOLDM",
-                               persistence_path=None, candle_persistence_path=candle_path)
+                               persistence_path=None, candle_persistence_path=candle_path,
+                               open_position_path=None)
 
 
 def test_fresh_engine_with_no_persisted_candles_is_not_warmed_up():

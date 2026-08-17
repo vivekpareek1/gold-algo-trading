@@ -16,7 +16,7 @@ def _engine(persistence_path=None):
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
     return LiveTradingEngine(Settings(), broker, symbol="GOLDM",
-                               persistence_path=persistence_path, candle_persistence_path=None)
+                               persistence_path=persistence_path, candle_persistence_path=None, open_position_path=None)
 
 
 def test_empty_history_returns_empty_list():

@@ -9,3 +9,4 @@ angel_one_feed.py
 *.csv
 *.jsonl
 candle_history.jsonl
+open_position.json

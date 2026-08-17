@@ -6,6 +6,11 @@ volume-feed sanity).
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# MUST be set before any import of api.main — see test_day_open_change_indicator.py
+os.environ.setdefault("TRADE_HISTORY_PATH", "")
+os.environ.setdefault("CANDLE_HISTORY_PATH", "")
+os.environ.setdefault("OPEN_POSITION_PATH", "")
+
 from config.settings import Settings
 from market_data.tick_aggregator import TickAggregator, Tick
 from execution.live_trading_engine import LiveTradingEngine, LiveTick
@@ -18,7 +23,7 @@ from tests.test_backtest_runner import make_synthetic_trending_candles
 def _engine():
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
-    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None), broker
+    return LiveTradingEngine(Settings(), broker, symbol="GOLDM", persistence_path=None, candle_persistence_path=None, open_position_path=None), broker
 
 
 # ---------- FINDING 1: a volume-less feed silently guts the strategy ----------

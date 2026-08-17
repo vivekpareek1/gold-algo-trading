@@ -57,6 +57,23 @@ class PaperBrokerProvider(BrokerProvider):
     def get_positions(self) -> list[Position]:
         return list(self._positions.values())
 
+    def restore_position(self, symbol: str, quantity: int, avg_price: float,
+                            margin_used_inr: float, equity_inr: float):
+        """
+        Re-establishes an open position's bookkeeping after a service
+        restart — NOT a new entry, so it must NOT charge commission or
+        apply slippage again (that already happened at the original
+        entry, before the restart). Also restores equity/margin exactly
+        as they were, since a fresh PaperBrokerProvider() otherwise
+        starts at the configured starting equity, silently erasing
+        whatever was already committed to the still-open position.
+        """
+        self._positions[symbol] = Position(
+            symbol=symbol, quantity=quantity, avg_price=avg_price, unrealized_pnl=0.0,
+        )
+        self._margin_used = margin_used_inr
+        self._equity = equity_inr
+
     def get_orders(self) -> list[OrderResult]:
         return list(self._orders.values())
 

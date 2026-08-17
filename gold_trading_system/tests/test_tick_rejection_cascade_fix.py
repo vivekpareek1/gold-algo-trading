@@ -21,7 +21,7 @@ def _engine():
     broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
     broker.connect()
     return LiveTradingEngine(Settings(), broker, symbol="GOLDM",
-                               persistence_path=None, candle_persistence_path=None)
+                               persistence_path=None, candle_persistence_path=None, open_position_path=None)
 
 
 def test_genuine_persistent_move_eventually_accepted():
