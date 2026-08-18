@@ -58,7 +58,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-fed-treasury-v17"
+BUILD_VERSION = "2026-08-18-comex-fairvalue-v18"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -85,6 +85,21 @@ except ImportError:
 
 
 @app.on_event("startup")
+def _push_external_data_to_engine():
+    """
+    Bridges external_quotes_poller's live COMEX gold + USD/INR data into
+    live_engine's fair-value calculation. This connection was the missing
+    link — the fair-value engine, its is_reliable gate, and its (small,
+    bounded ±10pt) confluence-score modifier were already fully built and
+    wired into signal evaluation, but nothing ever CALLED
+    set_external_reference_data() with real data, so it was permanently
+    stuck reporting "unreliable" regardless of how good the COMEX feed was.
+    """
+    s = external_quotes_poller.state
+    if s.comex_gold.value is not None and s.usd_inr.value is not None:
+        live_engine.set_external_reference_data(xauusd=s.comex_gold.value, usdinr=s.usd_inr.value)
+
+
 def start_feed():
     global LIVE_FEED_ACTIVE
     if _angel_feed is not None:
@@ -100,6 +115,17 @@ def start_feed():
     # into any trading decision.
     external_quotes_poller.start_background_thread()
     print("Started external reference quotes poller (USD/INR, COMEX Gold, DXY).")
+
+    def _external_data_bridge_loop():
+        while True:
+            try:
+                _push_external_data_to_engine()
+            except Exception as e:
+                print(f"External data bridge error: {type(e).__name__}: {e}")
+            time.sleep(30)
+    threading.Thread(target=_external_data_bridge_loop, daemon=True).start()
+    print("Started COMEX/USD-INR -> fair-value bridge (completes the already-built "
+          "fair-value confluence modifier, previously never connected to live data).")
 
     gold_news_monitor.start_background_thread()
     print("Started gold news monitor (Yahoo Finance RSS — Bloomberg-sourced headlines).")
@@ -369,6 +395,25 @@ def get_gold_news():
             }
             for a in assessments
         ],
+    }
+
+
+@app.get("/api/fair_value")
+def get_fair_value():
+    """MCX GOLDM vs COMEX-implied theoretical price (COMEX gold + USD/INR +
+    import duty + carry cost). This DOES feed a small, bounded (±10pt)
+    modifier into the live confluence score — see fair_value_deviation_max
+    in config — never a standalone trigger."""
+    snap = live_engine.state.last_snapshot
+    mcx_price = snap.get("ltp") if snap else None
+    if mcx_price is None:
+        return {"is_reliable": False, "unreliable_reason": "No live MCX price yet"}
+    fv = live_engine._compute_fair_value(mcx_price)
+    return {
+        "mcx_price": fv.mcx_price, "theoretical_price": round(fv.theoretical_price, 2),
+        "deviation": round(fv.deviation, 2), "deviation_pct": round(fv.deviation_pct, 3),
+        "deviation_zscore": round(fv.deviation_zscore, 2) if fv.deviation_zscore is not None else None,
+        "is_reliable": fv.is_reliable, "unreliable_reason": fv.unreliable_reason,
     }
 
 
@@ -715,6 +760,19 @@ _DASHBOARD_HTML = """
     </div>
   </div>
 
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head">
+      <h3>COMEX Fair Value (MCX vs International)</h3>
+    </div>
+    <div class="panel-body">
+      <div style="padding:0 0 10px; font-size:11px; color:var(--text-faint);">
+        MCX price vs. COMEX gold + USD/INR + import duty + carry cost. Feeds a small,
+        bounded modifier into the live signal (never a standalone trigger).
+      </div>
+      <div id="fairValueContent"><div class="empty-note">Loading...</div></div>
+    </div>
+  </div>
+
   <footer>
     <span><span class="dot-live"></span>Auto-refresh: 5s · Build: __BUILD_VERSION__</span>
     <span id="status">Connecting...</span>
@@ -931,6 +989,28 @@ async function loadGoldNews() {
   }
 }
 
+async function loadFairValue() {
+  try {
+    const resp = await fetch('/api/fair_value');
+    const data = await resp.json();
+    const el = document.getElementById('fairValueContent');
+    if (!data.is_reliable) {
+      el.innerHTML = `<div class="empty-note">Not yet reliable: ${data.unreliable_reason || 'waiting for data'}</div>`;
+      return;
+    }
+    const devColor = data.deviation >= 0 ? 'var(--bull)' : 'var(--bear)';
+    el.innerHTML = `
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px; font-size:13px;">
+        <div>MCX Price<br><span class="mono" style="font-size:16px; font-weight:700;">₹${data.mcx_price.toLocaleString('en-IN')}</span></div>
+        <div>Theoretical (COMEX-implied)<br><span class="mono" style="font-size:16px; font-weight:700;">₹${data.theoretical_price.toLocaleString('en-IN')}</span></div>
+        <div>Deviation<br><span class="mono" style="font-weight:700; color:${devColor};">${data.deviation>=0?'+':''}₹${data.deviation.toLocaleString('en-IN')} (${data.deviation_pct>=0?'+':''}${data.deviation_pct}%)</span></div>
+        <div>Z-score<br><span class="mono" style="font-weight:700;">${data.deviation_zscore !== null ? data.deviation_zscore : '--'}</span></div>
+      </div>`;
+  } catch (e) {
+    console.error('Fair value load error:', e);
+  }
+}
+
 async function refresh() {
   try {
     const snapResp = await fetch('/api/snapshot');
@@ -1033,6 +1113,7 @@ async function refresh() {
     await loadDailyPnl();
     await loadExternalQuotes();
     await loadGoldNews();
+    await loadFairValue();
 
     document.getElementById('status').textContent = 'Last updated ' + new Date().toLocaleTimeString();
   } catch (e) {
