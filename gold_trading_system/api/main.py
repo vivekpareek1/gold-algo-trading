@@ -60,7 +60,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-stop-anchor-fix-v21"
+BUILD_VERSION = "2026-08-18-prev-close-change-v22"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -171,6 +171,7 @@ class SnapshotResponse(BaseModel):
     instrument: str
     ltp: float
     day_open_price: float | None
+    prev_day_close_price: float | None
     regime_trend: str
     last_structure_event: str
     has_open_position: bool
@@ -293,6 +294,7 @@ def get_snapshot():
     return SnapshotResponse(
         instrument=settings.instrument.symbol, ltp=round(snap["ltp"], 2),
         day_open_price=round(snap["day_open_price"], 2) if snap.get("day_open_price") else None,
+        prev_day_close_price=round(snap["prev_day_close_price"], 2) if snap.get("prev_day_close_price") else None,
         regime_trend=snap["regime_trend"], last_structure_event=snap["last_structure_event"],
         has_open_position=snap["has_open_position"], open_position=snap["open_position"],
         trading_disabled=snap["risk_state"]["trading_disabled"],
@@ -1124,9 +1126,9 @@ async function refresh() {
     // what every real trading platform means by "change".
     document.getElementById('ltp').textContent = snap.ltp ? '₹' + fmt(snap.ltp) : '--';
     const changeEl = document.getElementById('change');
-    if (snap.day_open_price && snap.ltp) {
-      const diff = snap.ltp - snap.day_open_price;
-      const pct = (diff / snap.day_open_price) * 100;
+    if (snap.prev_day_close_price && snap.ltp) {
+      const diff = snap.ltp - snap.prev_day_close_price;
+      const pct = (diff / snap.prev_day_close_price) * 100;
       changeEl.textContent = (diff >= 0 ? '▲ ' : '▼ ') + Math.abs(diff).toFixed(2) +
         ' (' + (diff >= 0 ? '+' : '') + pct.toFixed(2) + '%)';
       changeEl.className = 'mono change ' + (diff > 0 ? 'bull' : diff < 0 ? 'bear' : 'flat');

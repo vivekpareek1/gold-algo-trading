@@ -165,6 +165,12 @@ class LiveEngineState:
     # trading platforms compare against the DAY'S OPEN (or previous close);
     # this is set once, on the first candle of each new trading day.
     day_open_price: float | None = None
+    # Real trading platforms compute "change" against the PREVIOUS trading
+    # day's closing price, not today's opening price (which can gap from
+    # yesterday's close — international gold trades near 24hrs, so this
+    # gap can be meaningful). This was a real correction to an earlier fix
+    # that had compared against today's open instead.
+    prev_day_close_price: float | None = None
     trade_log: list = field(default_factory=list)
     signal_log: list = field(default_factory=list)
     # bounded OHLCV history for chart display — not the full session (that
@@ -723,20 +729,34 @@ class LiveTradingEngine:
         self.state.last_snapshot = snapshot
         return snapshot
 
-    # ---------- day boundary handling (identical logic to backtest_runner) ----------
+    def _derive_prev_day_close_from_history(self, current_ref_day):
+        """
+        Called when the engine starts (fresh or after a restart) to find
+        the previous trading day's closing price from already-persisted
+        candle_history, so "change" is correct even before any live
+        cross-day transition has been observed this session.
+        """
+        for c in reversed(self.state.candle_history):
+            c_day = datetime.fromtimestamp(c["ts"], tz=timezone.utc).date()
+            if c_day < current_ref_day:
+                self.state.prev_day_close_price = c["close"]
+                return
+
     def _handle_day_boundary(self, tick: LiveTick):
         day = datetime.fromtimestamp(tick.ts, tz=timezone.utc).date()
         if self.state.current_day is None:
             self.state.current_day = day
-            # First tick this engine has ever seen — if the service started
-            # mid-session (e.g. after a restart), this is the best available
-            # reference rather than the true session open, but it's still
-            # far more meaningful than comparing against a rolling 5-minute
-            # window.
             self.state.day_open_price = tick.open
+            self._derive_prev_day_close_from_history(day)
             return
         if day == self.state.current_day:
             return
+
+        # A genuine day transition — capture the LAST known price (from
+        # the day that just ended) as the reference for "change" going
+        # forward, before anything else updates.
+        if self.state.last_snapshot:
+            self.state.prev_day_close_price = self.state.last_snapshot.get("ltp")
 
         self.risk_engine.state.trades_taken_today = 0
         self.risk_engine.state.daily_pnl_inr = 0.0
@@ -1007,6 +1027,7 @@ class LiveTradingEngine:
         return {
             "ts": tick.ts, "ltp": tick.close,
             "day_open_price": self.state.day_open_price,
+            "prev_day_close_price": self.state.prev_day_close_price,
             "regime_trend": struct_state.trend.value,
             "last_structure_event": struct_state.last_event.value,
             "has_open_position": tm is not None,
