@@ -86,7 +86,6 @@ except ImportError:
     _angel_feed = None
 
 
-@app.on_event("startup")
 def _push_external_data_to_engine():
     """
     Bridges external_quotes_poller's live COMEX gold + USD/INR data into
@@ -102,6 +101,7 @@ def _push_external_data_to_engine():
         live_engine.set_external_reference_data(xauusd=s.comex_gold.value, usdinr=s.usd_inr.value)
 
 
+@app.on_event("startup")
 def start_feed():
     global LIVE_FEED_ACTIVE
     if _angel_feed is not None:
