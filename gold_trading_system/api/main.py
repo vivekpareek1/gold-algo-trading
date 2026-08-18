@@ -22,6 +22,8 @@ from config.settings import Settings
 from execution.broker_adapters.paper_provider import PaperBrokerProvider
 from execution.live_trading_engine import LiveTradingEngine, LiveTick
 from market_data.external_quotes import ExternalQuotesPoller
+from market_data.resampler import resample, TIMEFRAME_MINUTES
+from backtesting.backtest_runner import OHLCV
 from news_engine.live_news_poller import GoldNewsMonitor
 
 app = FastAPI(title="Gold Trading System API", version="0.1.0")
@@ -58,7 +60,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-comex-fairvalue-v18"
+BUILD_VERSION = "2026-08-18-multi-timeframe-v19"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -348,6 +350,37 @@ def get_candles():
     return {"candles": live_engine.state.candle_history}
 
 
+@app.get("/api/candles/{timeframe}")
+def get_resampled_candles(timeframe: str):
+    """
+    Same candle history resampled to a higher timeframe (15M/1H/4H) for
+    multi-timeframe chart viewing. 1M is NOT offered — the live feed's
+    base granularity is 5M, and 5M candles cannot be split back into
+    genuine 1M data (it doesn't exist); only aggregating UP to coarser
+    timeframes is valid. The currently-forming (incomplete) trailing
+    bucket is excluded, since treating it as a closed candle would be
+    misleading for a chart meant to reflect real, settled price action.
+    """
+    if timeframe not in TIMEFRAME_MINUTES or TIMEFRAME_MINUTES[timeframe] < 5:
+        return {"error": f"Unsupported timeframe '{timeframe}'. "
+                          f"Supported: 5M, 15M, 1H, 4H (base feed is 5M; "
+                          f"finer resolution than that isn't available).",
+                "candles": []}
+    base_candles = [OHLCV(ts=c["ts"], open=c["open"], high=c["high"],
+                             low=c["low"], close=c["close"], volume=c["volume"])
+                      for c in live_engine.state.candle_history]
+    if timeframe == "5M":
+        resampled = [{"ts": c.ts, "open": c.open, "high": c.high,
+                        "low": c.low, "close": c.close, "volume": c.volume}
+                       for c in base_candles]
+    else:
+        result = resample(base_candles, base_timeframe="5M", target_timeframe=timeframe)
+        resampled = [{"ts": rc.ohlcv.ts, "open": rc.ohlcv.open, "high": rc.ohlcv.high,
+                        "low": rc.ohlcv.low, "close": rc.ohlcv.close, "volume": rc.ohlcv.volume}
+                       for rc in result if rc.is_complete]
+    return {"timeframe": timeframe, "candles": resampled}
+
+
 @app.get("/api/daily_pnl")
 def get_daily_pnl():
     """Real, brokerage-adjusted P&L grouped by trading day, most recent
@@ -590,6 +623,13 @@ _DASHBOARD_HTML = """
   .news-impact.HIGH { background: var(--bear-soft); color: var(--bear); }
   .news-impact.MEDIUM { background: rgba(201,162,39,0.14); color: var(--gold-soft); }
   .news-impact.LOW { background: var(--panel-2); color: var(--text-faint); }
+
+  .tf-btn {
+    background: var(--panel-2); border: 1px solid var(--panel-border); color: var(--text-faint);
+    padding: 4px 10px; border-radius: 6px; font-size: 11.5px; cursor: pointer; font-family: inherit;
+  }
+  .tf-btn:hover { color: var(--text); }
+  .tf-btn.active { background: rgba(201,162,39,0.14); color: var(--gold-soft); border-color: rgba(201,162,39,0.3); }
   .trade-badge {
     font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.03em;
   }
@@ -654,8 +694,14 @@ _DASHBOARD_HTML = """
     <!-- left column: chart -->
     <div class="panel">
       <div class="panel-head">
-        <h3>Price Action · 5M</h3>
-        <span id="trendTag" class="mono" style="font-size:11px; color:var(--text-faint);">--</span>
+        <h3>Price Action · <span id="chartTimeframeLabel">5M</span></h3>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="tf-btn active" data-tf="5M" onclick="switchTimeframe('5M')">5M</button>
+          <button class="tf-btn" data-tf="15M" onclick="switchTimeframe('15M')">15M</button>
+          <button class="tf-btn" data-tf="1H" onclick="switchTimeframe('1H')">1H</button>
+          <button class="tf-btn" data-tf="4H" onclick="switchTimeframe('4H')">4H</button>
+          <span id="trendTag" class="mono" style="font-size:11px; color:var(--text-faint); margin-left:8px;">--</span>
+        </div>
       </div>
       <div class="panel-body" style="padding: 10px;">
         <div id="chartEmpty" class="chart-empty">
@@ -855,8 +901,18 @@ function initChart() {
   chartInitialized = true;
 }
 
+let currentTimeframe = '5M';
+
+function switchTimeframe(tf) {
+  currentTimeframe = tf;
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === tf));
+  document.getElementById('chartTimeframeLabel').textContent = tf;
+  loadCandleHistory();
+}
+
 async function loadCandleHistory() {
-  const resp = await fetch('/api/candles');
+  const url = currentTimeframe === '5M' ? '/api/candles' : `/api/candles/${currentTimeframe}`;
+  const resp = await fetch(url);
   const data = await resp.json();
   if (data.candles && data.candles.length > 0) {
     if (!chartInitialized) initChart();
@@ -893,6 +949,15 @@ async function loadCandleHistory() {
       console.error('Chart render error:', e, 'candle count:', candles.length);
       document.getElementById('status').textContent = 'Chart render error: ' + e.message;
     }
+  } else if (chartInitialized) {
+    // switched to a higher timeframe but not enough 5M history has
+    // accumulated yet to form even one complete bucket — show empty
+    // state rather than silently leaving the PREVIOUS timeframe's stale
+    // chart on screen, which would misleadingly look like real data
+    candleSeries.setData([]);
+    volumeSeries.setData([]);
+    document.getElementById('status').textContent =
+      `Not enough history yet for ${currentTimeframe} (still accumulating 5M candles)`;
   }
 }
 
