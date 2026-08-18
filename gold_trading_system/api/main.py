@@ -60,7 +60,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-multi-timeframe-v19"
+BUILD_VERSION = "2026-08-18-xau-chart-v20"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -790,6 +790,41 @@ _DASHBOARD_HTML = """
                 text-decoration:none; font-size:13px; font-weight:600;">
         Open GOLDM chart on TradingView ↗
       </a>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-head">
+      <h3>XAU/USD (International Spot Gold)</h3>
+    </div>
+    <div class="panel-body" style="padding:4px;">
+      <div style="padding:8px 10px; font-size:11.5px; color:var(--text-faint); line-height:1.5;">
+        International USD gold price — NOT the same as MCX GOLDM (different currency, different
+        exchange, no import duty/carry-cost baked in). Reference only; see the "COMEX Fair Value"
+        panel above for how MCX relates to this. Unlike the earlier MCX embed attempt, XAU/USD is
+        a freely available symbol with no login/data-license requirement, so this should load
+        reliably — if it ever shows the wrong symbol again, use the link-out approach instead.
+      </div>
+      <div class="tradingview-widget-container" style="height:500px; width:100%;">
+        <div class="tradingview-widget-container__widget" style="height:100%; width:100%;"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+        {
+          "autosize": true,
+          "symbol": "OANDA:XAUUSD",
+          "interval": "5",
+          "timezone": "Asia/Kolkata",
+          "theme": "dark",
+          "style": "1",
+          "locale": "en",
+          "backgroundColor": "rgba(19, 22, 26, 1)",
+          "gridColor": "rgba(28, 32, 38, 1)",
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "allow_symbol_change": false,
+          "support_host": "https://www.tradingview.com"
+        }
+        </script>
+      </div>
     </div>
   </div>
 
