@@ -61,7 +61,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-ema-overlay-v23"
+BUILD_VERSION = "2026-08-18-chart-fix-v24"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -401,6 +401,20 @@ def get_candles_with_ema(timeframe: str):
     base_candles = [OHLCV(ts=c["ts"], open=c["open"], high=c["high"],
                              low=c["low"], close=c["close"], volume=c["volume"])
                       for c in live_engine.state.candle_history]
+    # Defensive sort + dedupe before EMA replay — candle_history is
+    # normally already chronological, but any edge case (restart/replay
+    # overlap) that introduced an out-of-order or duplicate entry would
+    # both corrupt the EMA values themselves (EMA is order-sensitive) and
+    # break chart rendering (lightweight-charts requires strictly
+    # ascending, unique times).
+    seen_ts = set()
+    deduped = []
+    for c in sorted(base_candles, key=lambda x: x.ts):
+        if c.ts not in seen_ts:
+            seen_ts.add(c.ts)
+            deduped.append(c)
+    base_candles = deduped
+
     if timeframe == "5M":
         working_candles = base_candles
     else:
@@ -1028,16 +1042,35 @@ async function loadCandleHistory() {
       chart.timeScale().fitContent();
       volumeChart.timeScale().fitContent();
 
-      // EMA9/21/50 overlay — same periods the trading logic uses
+      // EMA9/21/50 overlay — same periods the trading logic uses.
+      // BUGFIX: must sort+dedupe EMA timestamps exactly like the candle
+      // series does — lightweight-charts requires strictly ascending,
+      // unique times across ALL series on a chart. Skipping this caused
+      // the ENTIRE chart (including the already-working candles) to
+      // silently fail to render, since candle_history could have grown
+      // or reordered slightly between the candles request and this EMA
+      // request.
       const emaUrl = currentTimeframe === '5M' ? '/api/candles/5M/ema' : `/api/candles/${currentTimeframe}/ema`;
       fetch(emaUrl).then(r => r.json()).then(emaData => {
         if (!emaData.candles) return;
-        const e9 = emaData.candles.filter(c => c.ema9 !== null).map(c => ({ time: c.ts, value: c.ema9 }));
-        const e21 = emaData.candles.filter(c => c.ema21 !== null).map(c => ({ time: c.ts, value: c.ema21 }));
-        const e50 = emaData.candles.filter(c => c.ema50 !== null).map(c => ({ time: c.ts, value: c.ema50 }));
-        ema9Series.setData(e9);
-        ema21Series.setData(e21);
-        ema50Series.setData(e50);
+        const emaSeen = new Set();
+        const emaSorted = [...emaData.candles]
+          .sort((a, b) => a.ts - b.ts)
+          .filter(c => {
+            if (emaSeen.has(c.ts)) return false;
+            emaSeen.add(c.ts);
+            return true;
+          });
+        const e9 = emaSorted.filter(c => c.ema9 !== null).map(c => ({ time: c.ts, value: c.ema9 }));
+        const e21 = emaSorted.filter(c => c.ema21 !== null).map(c => ({ time: c.ts, value: c.ema21 }));
+        const e50 = emaSorted.filter(c => c.ema50 !== null).map(c => ({ time: c.ts, value: c.ema50 }));
+        try {
+          ema9Series.setData(e9);
+          ema21Series.setData(e21);
+          ema50Series.setData(e50);
+        } catch (emaErr) {
+          console.error('EMA series render error (candles unaffected):', emaErr);
+        }
       }).catch(e => console.error('EMA load error:', e));
     } catch (e) {
       console.error('Chart render error:', e, 'candle count:', candles.length);

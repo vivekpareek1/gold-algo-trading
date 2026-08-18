@@ -104,6 +104,35 @@ def test_dashboard_structurally_valid_with_ema_overlay():
     assert html.count("<script") == html.count("</script>")
 
 
+def test_ema_endpoint_handles_out_of_order_duplicate_candles():
+    """THE core bug fix: candle_history could theoretically have an
+    out-of-order or duplicate entry (restart/replay edge case). The EMA
+    endpoint must sort+dedupe before replay, or (a) EMA values themselves
+    become order-sensitive-wrong, and (b) the chart's OWN candle series
+    could fail to render (lightweight-charts requires strictly ascending,
+    unique times across ALL series sharing a chart)."""
+    from fastapi.testclient import TestClient
+    from api.main import app, live_engine
+
+    live_engine.state.candle_history = []
+    base_ts = 1735689600
+    for i in range(60):
+        live_engine.state.candle_history.append({
+            "ts": base_ts + i * 300, "open": 155000 + i, "high": 155010 + i,
+            "low": 154990 + i, "close": 155005 + i, "volume": 100 + i,
+        })
+    # inject a duplicate + an out-of-order entry
+    live_engine.state.candle_history.append({"ts": base_ts + 30 * 300, "open": 155030,
+                                                 "high": 155040, "low": 155020, "close": 155035, "volume": 130})
+    live_engine.state.candle_history.insert(5, {"ts": base_ts + 59 * 300, "open": 155059,
+                                                    "high": 155069, "low": 155049, "close": 155064, "volume": 159})
+
+    client = TestClient(app)
+    resp = client.get("/api/candles/5M/ema")
+    data = resp.json()
+    timestamps = [c["ts"] for c in data["candles"]]
+    assert timestamps == sorted(timestamps), "EMA candle timestamps must be strictly ascending"
+    assert len(timestamps) == len(set(timestamps)), "EMA candle timestamps must have no duplicates"
 if __name__ == "__main__":
     tests = [
         test_ema_endpoint_returns_correct_periods,
@@ -113,6 +142,7 @@ if __name__ == "__main__":
         test_invalid_timeframe_rejected_gracefully,
         test_dashboard_includes_ema_line_series,
         test_dashboard_structurally_valid_with_ema_overlay,
+        test_ema_endpoint_handles_out_of_order_duplicate_candles,
     ]
     failed = 0
     for t in tests:
@@ -127,3 +157,5 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
