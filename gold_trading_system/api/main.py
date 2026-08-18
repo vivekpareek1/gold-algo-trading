@@ -24,6 +24,7 @@ from execution.live_trading_engine import LiveTradingEngine, LiveTick
 from market_data.external_quotes import ExternalQuotesPoller
 from market_data.resampler import resample, TIMEFRAME_MINUTES
 from backtesting.backtest_runner import OHLCV
+from indicators.incremental import IndicatorEngine
 from news_engine.live_news_poller import GoldNewsMonitor
 
 app = FastAPI(title="Gold Trading System API", version="0.1.0")
@@ -60,7 +61,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-prev-close-change-v22"
+BUILD_VERSION = "2026-08-18-ema-overlay-v23"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -381,6 +382,42 @@ def get_resampled_candles(timeframe: str):
                         "low": rc.ohlcv.low, "close": rc.ohlcv.close, "volume": rc.ohlcv.volume}
                        for rc in result if rc.is_complete]
     return {"timeframe": timeframe, "candles": resampled}
+
+
+@app.get("/api/candles/{timeframe}/ema")
+def get_candles_with_ema(timeframe: str):
+    """
+    EMA9/21/50 aligned with each candle at the given timeframe — the SAME
+    periods the trading logic itself uses for confluence decisions (not
+    an arbitrary EMA20, which the system never actually looks at).
+    Recomputed on-demand by replaying candle_history through a fresh
+    IndicatorEngine, chronologically, so each candle's EMA reflects what
+    would genuinely have been known at that point in time (not today's
+    latest EMA state applied retroactively, which would be wrong).
+    """
+    if timeframe not in TIMEFRAME_MINUTES or TIMEFRAME_MINUTES[timeframe] < 5:
+        return {"error": f"Unsupported timeframe '{timeframe}'", "candles": []}
+
+    base_candles = [OHLCV(ts=c["ts"], open=c["open"], high=c["high"],
+                             low=c["low"], close=c["close"], volume=c["volume"])
+                      for c in live_engine.state.candle_history]
+    if timeframe == "5M":
+        working_candles = base_candles
+    else:
+        result = resample(base_candles, base_timeframe="5M", target_timeframe=timeframe)
+        working_candles = [rc.ohlcv for rc in result if rc.is_complete]
+
+    ind = IndicatorEngine()
+    out = []
+    for c in working_candles:
+        r = ind.update(c.high, c.low, c.close, c.volume)
+        out.append({
+            "ts": c.ts, "close": c.close,
+            "ema9": round(r["ema9"], 2) if r["ema9"] is not None else None,
+            "ema21": round(r["ema21"], 2) if r["ema21"] is not None else None,
+            "ema50": round(r["ema50"], 2) if r["ema50"] is not None else None,
+        })
+    return {"timeframe": timeframe, "candles": out}
 
 
 @app.get("/api/daily_pnl")
@@ -867,6 +904,7 @@ _DASHBOARD_HTML = """
 function fmt(n) { return typeof n === 'number' ? n.toLocaleString('en-IN', {maximumFractionDigits:2}) : n; }
 
 let chart = null, volumeChart = null, candleSeries = null, volumeSeries = null;
+let ema9Series = null, ema21Series = null, ema50Series = null;
 let lastClose = null, chartInitialized = false;
 
 function tickClock() {
@@ -908,6 +946,13 @@ function initChart() {
     borderUpColor: '#3FA796', borderDownColor: '#C24F42',
     wickUpColor: '#3FA796', wickDownColor: '#C24F42',
   });
+
+  // EMA9/21/50 — the SAME periods the trading logic itself uses for
+  // confluence decisions, so this shows exactly what the system sees,
+  // not an arbitrary reference line.
+  ema9Series = chart.addLineSeries({ color: '#5EC8E8', lineWidth: 1, title: 'EMA9', priceLineVisible: false, lastValueVisible: false });
+  ema21Series = chart.addLineSeries({ color: '#C9A227', lineWidth: 1, title: 'EMA21', priceLineVisible: false, lastValueVisible: false });
+  ema50Series = chart.addLineSeries({ color: '#B57EDC', lineWidth: 1, title: 'EMA50', priceLineVisible: false, lastValueVisible: false });
 
   volumeChart = LightweightCharts.createChart(volumeContainer, {
     width: volumeContainer.clientWidth,
@@ -982,6 +1027,18 @@ async function loadCandleHistory() {
       lastClose = candles[candles.length - 1].close;
       chart.timeScale().fitContent();
       volumeChart.timeScale().fitContent();
+
+      // EMA9/21/50 overlay — same periods the trading logic uses
+      const emaUrl = currentTimeframe === '5M' ? '/api/candles/5M/ema' : `/api/candles/${currentTimeframe}/ema`;
+      fetch(emaUrl).then(r => r.json()).then(emaData => {
+        if (!emaData.candles) return;
+        const e9 = emaData.candles.filter(c => c.ema9 !== null).map(c => ({ time: c.ts, value: c.ema9 }));
+        const e21 = emaData.candles.filter(c => c.ema21 !== null).map(c => ({ time: c.ts, value: c.ema21 }));
+        const e50 = emaData.candles.filter(c => c.ema50 !== null).map(c => ({ time: c.ts, value: c.ema50 }));
+        ema9Series.setData(e9);
+        ema21Series.setData(e21);
+        ema50Series.setData(e50);
+      }).catch(e => console.error('EMA load error:', e));
     } catch (e) {
       console.error('Chart render error:', e, 'candle count:', candles.length);
       document.getElementById('status').textContent = 'Chart render error: ' + e.message;
