@@ -60,7 +60,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-18-xau-chart-v20"
+BUILD_VERSION = "2026-08-18-stop-anchor-fix-v21"
 
 _last_price = 63000.0
 _tick_count = 0

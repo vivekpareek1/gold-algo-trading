@@ -30,7 +30,7 @@ from trade_manager.trade_manager import (
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
 from execution.broker_adapters.base import BrokerProvider, OrderRequest, OrderSide
 from execution.brokerage_calculator import calculate_charges
-from gold_intelligence.fair_value import FairValueResult, MacroBiasResult
+from gold_intelligence.fair_value import FairValueResult, MacroBiasResult, FairValueEngine
 
 
 @dataclass
@@ -139,6 +139,14 @@ class LiveEngineState:
     # cooldown window; the OPPOSITE direction is never blocked.
     last_momentum_decay_exit_direction: str | None = None
     last_momentum_decay_exit_ts: int | None = None
+    # External reference data (COMEX gold via GC=F, USD/INR) for the
+    # FairValueEngine — pushed in periodically from outside (api/main.py's
+    # external_quotes_poller), since this engine has no direct internet
+    # access of its own. None until the first push arrives; the fair-value
+    # calculation gracefully falls back to "unreliable" until then.
+    external_xauusd: float | None = None
+    external_usdinr: float | None = None
+    external_data_updated_at: float | None = None
     # Tracks consecutive REJECTED ticks, specifically for the price-jump
     # check. See _tick_is_sane — without this, a genuine large move (rare,
     # but real gaps do happen) would be rejected FOREVER, since the
@@ -209,6 +217,7 @@ class LiveTradingEngine:
         self.signal_engine = SignalEngine(config)
         self.risk_engine = RiskEngine(config, DailyRiskState())
         self.stop_engine = StopLossEngine(config)
+        self.fair_value_engine = FairValueEngine(config)
         self.target_engine = TargetEngine(config)
 
         self.state = LiveEngineState()
@@ -517,6 +526,58 @@ class LiveTradingEngine:
             if replayed >= 30:
                 self.state.indicators_warmed_up_from_replay = True
 
+    def _compute_fair_value(self, mcx_price: float) -> FairValueResult:
+        """
+        Real FairValueEngine calculation using live external COMEX
+        gold + USD/INR data, when available and fresh. Falls back to
+        an explicitly "unreliable" placeholder — never a fabricated
+        number — if external data hasn't arrived yet or has gone stale
+        (>10 minutes old, generous given the external poller refreshes
+        every 60s and this is informational, not safety-critical).
+        """
+        EXTERNAL_DATA_MAX_AGE_SEC = 600
+        xauusd = self.state.external_xauusd
+        usdinr = self.state.external_usdinr
+        updated_at = self.state.external_data_updated_at
+
+        if xauusd is None or usdinr is None or updated_at is None:
+            return FairValueResult(mcx_price=mcx_price, theoretical_price=mcx_price,
+                                      deviation=0, deviation_pct=0, deviation_zscore=0.0,
+                                      is_reliable=False,
+                                      unreliable_reason="No external COMEX/USD-INR data received yet")
+        if time.time() - updated_at > EXTERNAL_DATA_MAX_AGE_SEC:
+            return FairValueResult(mcx_price=mcx_price, theoretical_price=mcx_price,
+                                      deviation=0, deviation_pct=0, deviation_zscore=0.0,
+                                      is_reliable=False,
+                                      unreliable_reason="External reference data is stale")
+
+        # v1 simplification: a fixed mid-cycle estimate for days-to-expiry
+        # rather than tracking the exact selected contract's real expiry
+        # date here (that lives in the feed handler, not this engine).
+        # carry_cost's contribution to theoretical price is small relative
+        # to the metal-price/FX components, so this approximation doesn't
+        # materially distort the deviation reading.
+        APPROX_DAYS_TO_EXPIRY = 30
+
+        return self.fair_value_engine.calculate(
+            mcx_price=mcx_price, xauusd=xauusd, usdinr=usdinr,
+            days_to_expiry=APPROX_DAYS_TO_EXPIRY, both_sessions_live=True, data_stale=False,
+        )
+
+    def set_external_reference_data(self, xauusd: float, usdinr: float):
+        """
+        Called periodically from outside (api/main.py, using its own
+        external_quotes_poller) to feed live COMEX gold and USD/INR into
+        this engine's fair-value calculation. xauusd here is COMEX gold
+        futures (GC=F) used as a spot-price proxy — there is a small,
+        normally minor basis between futures and true spot XAU/USD; this
+        is a documented v1 simplification, not an attempt at
+        futures-curve-accurate pricing.
+        """
+        self.state.external_xauusd = xauusd
+        self.state.external_usdinr = usdinr
+        self.state.external_data_updated_at = time.time()
+
     def seconds_since_last_tick(self) -> float | None:
         """Wall-clock seconds since a tick last arrived, or None if none ever
         has. Used to distinguish 'market is quiet' from 'the feed is dead'."""
@@ -737,6 +798,19 @@ class LiveTradingEngine:
                 symbol=self.symbol, side=close_side, quantity=self.state.open_trade_lots,
             )
             equity_before_close = self.broker.get_balance().equity_inr
+            # BUGFIX (found via a real -1.22R stop-loss trade, should be
+            # ~-1.0R): the quote was last set to the CANDLE'S CLOSE price
+            # (from the routine set_quote() call earlier this tick), not
+            # the actual stop/target level where the exit was triggered.
+            # On a candle that moved hard through the stop, the market
+            # order filled at the candle's close — potentially far beyond
+            # the intended stop level — instead of near the stop itself,
+            # like a real stop order would. Re-anchor the quote to the
+            # actual exit level right before placing the closing order, so
+            # only normal spread/slippage applies, not the candle's full
+            # excess travel beyond the stop.
+            if hasattr(self.broker, "set_quote"):
+                self.broker.set_quote(self.symbol, ltp=analytical_exit_price, volume=tick.volume)
             close_fill = self.broker.place_order(close_order)
             exit_price = (close_fill.filled_price if close_fill.status.value == "FILLED"
                            else analytical_exit_price)
@@ -805,11 +879,11 @@ class LiveTradingEngine:
         situation = self.situation_analyzer.analyze(htf_struct_state, struct_state, ind_snapshot,
                                                        MacroContext())
 
+        fair_value = self._compute_fair_value(tick.close)
+
         conf_inputs = ConfluenceInputs(
             ltf_structure=struct_state, situation=situation,
-            fair_value=FairValueResult(mcx_price=tick.close, theoretical_price=tick.close,
-                                         deviation=0, deviation_pct=0, deviation_zscore=0.0,
-                                         is_reliable=False),
+            fair_value=fair_value,
             macro=MacroBiasResult(macro_bias=0.0, components={"session_quality_ok": True}),
             ema_aligned_bullish=ind_result["ema9"] > ind_result["ema21"] > ind_result["ema50"],
             ema_aligned_bearish=ind_result["ema9"] < ind_result["ema21"] < ind_result["ema50"],
