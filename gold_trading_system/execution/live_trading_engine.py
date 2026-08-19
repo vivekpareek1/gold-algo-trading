@@ -29,7 +29,7 @@ from trade_manager.trade_manager import (
 )
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
 from execution.broker_adapters.base import BrokerProvider, OrderRequest, OrderSide
-from execution.brokerage_calculator import calculate_charges
+from execution.brokerage_calculator import calculate_charges, calculate_charges_with_partial_booking
 from gold_intelligence.fair_value import FairValueResult, MacroBiasResult, FairValueEngine
 
 
@@ -836,9 +836,13 @@ class LiveTradingEngine:
                            else analytical_exit_price)
 
             r = tm.blended_r_multiple(exit_price)
-            charges = calculate_charges(
+            charges = calculate_charges_with_partial_booking(
                 direction=tm.state.direction, entry_price=tm.state.entry_price,
-                exit_price=exit_price, lots=self.state.open_trade_lots,
+                original_risk_points=tm.state.original_risk_points,
+                realized_legs=tm.state.realized_legs,
+                final_exit_price=exit_price,
+                quantity_remaining_pct=tm.state.quantity_remaining_pct,
+                total_lots=self.state.open_trade_lots,
                 point_value_inr=self.config.instrument.point_value_inr,
             )
             # reconcile: the broker's own place_order() already applied its

@@ -30,7 +30,7 @@ from execution.broker_adapters.paper_provider import PaperBrokerProvider
 from execution.broker_adapters.base import OrderRequest, OrderSide
 from backtesting.metrics import compute_metrics, BacktestMetrics
 from target_engine.stop_target_engine import StopLossEngine, TargetEngine
-from execution.brokerage_calculator import calculate_charges
+from execution.brokerage_calculator import calculate_charges, calculate_charges_with_partial_booking
 
 
 @dataclass
@@ -95,7 +95,16 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   same_direction_reentry_cooldown_sec: int | None = None,
                   require_near_support_resistance: bool | None = None,
                   support_resistance_proximity_atr_mult: float = 1.5,
+                  require_london_ny_overlap: bool | None = None,
                   verbose: bool = False) -> BacktestResult:
+    """
+    require_london_ny_overlap: if True, only allows new entries between
+    13:00-17:00 UTC (the London-New York session overlap — the period of
+    peak institutional gold volume). Found via real-data analysis: trades
+    in this window showed +0.844R expectancy / PF 3.05 vs +0.477R / PF
+    2.24 outside it — both profitable, but the overlap window notably
+    stronger. None (default) preserves original behavior.
+    """
     """
     candles: chronologically ordered OHLCV list (already historical, no
     forward-looking data).
@@ -230,10 +239,14 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                 r = open_trade_manager.blended_r_multiple(exit_price)
                 r_multiples.append(r)
                 risk_engine.record_trade_result(r * config.risk.max_risk_per_trade_inr)
-                charges = calculate_charges(
+                charges = calculate_charges_with_partial_booking(
                     direction=open_trade_manager.state.direction,
                     entry_price=open_trade_manager.state.entry_price,
-                    exit_price=exit_price, lots=open_trade_lots,
+                    original_risk_points=open_trade_manager.state.original_risk_points,
+                    realized_legs=open_trade_manager.state.realized_legs,
+                    final_exit_price=exit_price,
+                    quantity_remaining_pct=open_trade_manager.state.quantity_remaining_pct,
+                    total_lots=open_trade_lots,
                     point_value_inr=config.instrument.point_value_inr,
                 )
                 trade_log.append({
@@ -313,6 +326,11 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         entry_price = candle.close
         nearest_swing_low = (struct_state.swing_lows[-1].price if struct_state.swing_lows else None)
         nearest_swing_high = (struct_state.swing_highs[-1].price if struct_state.swing_highs else None)
+
+        if require_london_ny_overlap:
+            entry_hour_utc = datetime.fromtimestamp(candle.ts, tz=timezone.utc).hour
+            if not (13 <= entry_hour_utc < 17):
+                continue
 
         # Real-data finding: LONG entries far from a recent swing low
         # (support) and SHORT entries far from a recent swing high

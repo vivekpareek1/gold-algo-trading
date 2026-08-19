@@ -95,3 +95,80 @@ def calculate_charges(direction: str, entry_price: float, exit_price: float,
         total_charges_inr=round(total_charges, 2),
         gross_pnl_inr=round(gross_pnl, 2), net_pnl_inr=round(net_pnl, 2),
     )
+
+
+def calculate_charges_with_partial_booking(direction: str, entry_price: float,
+                                              original_risk_points: float,
+                                              realized_legs: list[tuple[float, float]],
+                                              final_exit_price: float,
+                                              quantity_remaining_pct: float,
+                                              total_lots: float,
+                                              point_value_inr: float = 10.0,
+                                              lot_multiplier: float = 10.0) -> ChargesBreakdown:
+    """
+    BUGFIX (real, significant gap): the plain calculate_charges() treats a
+    trade as if the ENTIRE position closed once, at ONE final price — but
+    a trade with partial booking (33% at +1R, 33% at Target 1, etc.)
+    genuinely closes in MULTIPLE separate transactions at DIFFERENT
+    prices, each with its own real commission/CTT/GST/exchange/stamp
+    charges. Using only the final price on the FULL lot count badly
+    understates (or overstates) gross P&L for any trade that partially
+    booked profit — found via a large, otherwise-unexplained gap between
+    a strategy's positive blended R-multiple and its actual negative
+    real-rupee P&L across a 2-year backtest.
+
+    realized_legs: list of (pct, r_at_leg) exactly as stored on
+    TradeManagerState — each leg's price is reconstructed from its R value
+    (r = points_moved / original_risk_points), which is exact since that's
+    precisely how blended_r_multiple() already derives the true R.
+
+    Each leg (including the final residual close) is charged as its OWN
+    separate closing transaction — matching what a real broker statement
+    would show for a multi-leg exit — then summed into one total.
+    """
+    all_legs_pct_and_price = []
+    for pct, r_at_leg in realized_legs:
+        points_at_leg = r_at_leg * original_risk_points
+        leg_price = (entry_price + points_at_leg if direction == "LONG"
+                      else entry_price - points_at_leg)
+        all_legs_pct_and_price.append((pct, leg_price))
+
+    residual_pct = max(0.0, quantity_remaining_pct)
+    if residual_pct > 0:
+        all_legs_pct_and_price.append((residual_pct, final_exit_price))
+
+    total_gross = 0.0
+    total_charges = 0.0
+    breakdown_sum = {"brokerage": 0.0, "ctt": 0.0, "exchange": 0.0, "gst": 0.0,
+                       "sebi": 0.0, "stamp": 0.0}
+
+    for pct, leg_exit_price in all_legs_pct_and_price:
+        leg_lots = total_lots * (pct / 100.0)
+        if leg_lots <= 0:
+            continue
+        leg_charges = calculate_charges(direction=direction, entry_price=entry_price,
+                                           exit_price=leg_exit_price, lots=leg_lots,
+                                           point_value_inr=point_value_inr,
+                                           lot_multiplier=lot_multiplier)
+        total_gross += leg_charges.gross_pnl_inr
+        total_charges += leg_charges.total_charges_inr
+        breakdown_sum["brokerage"] += leg_charges.brokerage_inr
+        breakdown_sum["ctt"] += leg_charges.ctt_inr
+        breakdown_sum["exchange"] += leg_charges.exchange_txn_charge_inr
+        breakdown_sum["gst"] += leg_charges.gst_inr
+        breakdown_sum["sebi"] += leg_charges.sebi_fee_inr
+        breakdown_sum["stamp"] += leg_charges.stamp_duty_inr
+
+    return ChargesBreakdown(
+        buy_turnover_inr=0.0, sell_turnover_inr=0.0,   # not meaningful summed across legs at different prices
+        brokerage_inr=round(breakdown_sum["brokerage"], 2),
+        ctt_inr=round(breakdown_sum["ctt"], 2),
+        exchange_txn_charge_inr=round(breakdown_sum["exchange"], 2),
+        gst_inr=round(breakdown_sum["gst"], 2),
+        sebi_fee_inr=round(breakdown_sum["sebi"], 2),
+        stamp_duty_inr=round(breakdown_sum["stamp"], 2),
+        total_charges_inr=round(total_charges, 2),
+        gross_pnl_inr=round(total_gross, 2),
+        net_pnl_inr=round(total_gross - total_charges, 2),
+    )
+
