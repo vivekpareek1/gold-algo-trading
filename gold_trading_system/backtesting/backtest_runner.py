@@ -96,16 +96,28 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   require_near_support_resistance: bool | None = None,
                   support_resistance_proximity_atr_mult: float = 1.5,
                   require_london_ny_overlap: bool | None = None,
+                  require_volatility_expansion: bool | None = None,
+                  volatility_expansion_mult: float = 1.3,
+                  starting_equity_inr: float = 500_000.0,
+                  base_trades_normal_threshold: int | None = None,
+                  extended_trades_min_confidence: float = 80.0,
+                  require_multi_timeframe_alignment: bool | None = None,
                   verbose: bool = False) -> BacktestResult:
     """
+    base_trades_normal_threshold: if set (e.g. 4), the first N trades each
+    day use the normal confluence threshold (config.thresholds.no_trade_max)
+    as usual. Trades BEYOND that count (up to max_trades_per_day) require
+    a MUCH higher confidence score (extended_trades_min_confidence) to
+    fire — reserving the "extra" daily quota specifically for
+    high-conviction, likely-bigger-movement setups, rather than diluting
+    it with more average-quality trades (which was tested and shown to
+    make things worse). None (default) preserves original behavior.
     require_london_ny_overlap: if True, only allows new entries between
     13:00-17:00 UTC (the London-New York session overlap — the period of
     peak institutional gold volume). Found via real-data analysis: trades
     in this window showed +0.844R expectancy / PF 3.05 vs +0.477R / PF
     2.24 outside it — both profitable, but the overlap window notably
     stronger. None (default) preserves original behavior.
-    """
-    """
     candles: chronologically ordered OHLCV list (already historical, no
     forward-looking data).
 
@@ -138,6 +150,15 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
     if htf_timeframe is not None:
         htf_lookup = build_htf_trend_lookup(candles, base_timeframe, htf_timeframe)
 
+    # For multi-timeframe alignment: also build a 15M trend lookup
+    # (independent of htf_timeframe, which is typically 1H/4H) — used to
+    # require 15M AND 1H trend to agree with the base-timeframe direction
+    # before entry, per Vivek's request to check price action across
+    # multiple timeframes (1M excluded — no real 1-minute data exists).
+    mtf_15m_lookup = None
+    if require_multi_timeframe_alignment:
+        mtf_15m_lookup = build_htf_trend_lookup(candles, base_timeframe, "15M")
+
     structure = MarketStructureEngine()
     indicators = IndicatorEngine()
     situation_analyzer = SituationAnalyzer(config)
@@ -145,7 +166,7 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
     risk_engine = RiskEngine(config, DailyRiskState())
     stop_engine = StopLossEngine(config)
     target_engine = TargetEngine(config)
-    broker = PaperBrokerProvider(starting_equity_inr=500_000.0)
+    broker = PaperBrokerProvider(starting_equity_inr=starting_equity_inr)
     broker.connect()
 
     trade_log = []
@@ -316,7 +337,23 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         if result.decision == Decision.NO_TRADE:
             continue
 
+        # Reserve the "extended" daily quota (beyond base_trades_normal_threshold)
+        # for genuinely high-conviction setups only — don't waste it on
+        # average-quality trades just because the day's early quota is used up.
+        if base_trades_normal_threshold is not None:
+            trades_today_so_far = risk_engine.state.trades_taken_today
+            if trades_today_so_far >= base_trades_normal_threshold:
+                if result.confidence < extended_trades_min_confidence:
+                    continue
+
         direction = "LONG" if result.decision == Decision.BUY else "SHORT"
+
+        if require_multi_timeframe_alignment and mtf_15m_lookup is not None and htf_lookup is not None:
+            trend_15m = _htf_trend_as_of(candle.ts, mtf_15m_lookup)
+            trend_1h = _htf_trend_as_of(candle.ts, htf_lookup)
+            wanted_trend = TrendState.TRENDING_UP if direction == "LONG" else TrendState.TRENDING_DOWN
+            if trend_15m != wanted_trend or trend_1h != wanted_trend:
+                continue   # 15M and 1H must BOTH agree with the entry direction
 
         if (same_direction_reentry_cooldown_sec is not None and last_momentum_decay_exit
                 and last_momentum_decay_exit["direction"] == direction
@@ -337,6 +374,16 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         # (resistance) were, as a group, net LOSERS (-0.059R and -0.079R
         # respectively) on 2-year real MCX data, while entries near
         # support/resistance were strongly profitable (+0.913R / +0.363R).
+        # "Wait when there's no movement, act when there is" — only enter
+        # when CURRENT volatility (ATR) is genuinely EXPANDING relative to
+        # its recent average, not just when confluence score passes.
+        # This directly targets Vivek's observation: the system was taking
+        # trades during quiet periods and missing genuinely large moves.
+        if require_volatility_expansion:
+            atr_avg = ind_result["atr_avg_20"] or ind_result["atr"] or 1.0
+            if ind_result["atr"] < atr_avg * volatility_expansion_mult:
+                continue
+
         if require_near_support_resistance:
             atr_now = ind_result["atr"] or 10.0
             proximity = atr_now * support_resistance_proximity_atr_mult

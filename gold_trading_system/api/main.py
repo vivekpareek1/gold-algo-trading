@@ -61,7 +61,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-19-lots-cap-fix-v25"
+BUILD_VERSION = "2026-08-19-mtf-alignment-v26"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -799,7 +799,7 @@ _DASHBOARD_HTML = """
               <div id="tradesToday" class="value mono">--</div>
             </div>
             <div class="stat">
-              <div class="label">Session Total</div>
+              <div class="label">All-Time Trades (persisted)</div>
               <div id="totalTrades" class="value mono">--</div>
             </div>
             <div class="stat">

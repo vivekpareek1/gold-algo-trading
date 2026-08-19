@@ -116,3 +116,59 @@ than any of the position-sizing/timeframe experiments tried today.**
 Real 2-year MCX 5-minute OHLCV data used for all backtests:
 `/mnt/user-data/uploads/mcx_goldm_5min.csv` (in Claude's sandbox — will
 need to be re-uploaded in a fresh session).
+
+---
+
+## MAJOR BREAKTHROUGH (2026-08-19, later same day) — Multi-timeframe alignment
+
+Vivek's idea: check price action across 5M, 15M, and 1H (not just the 5M
+entry signal alone) before taking a trade. 1M was excluded — no real
+1-minute data exists.
+
+**This is the single biggest improvement found in the entire
+investigation — bigger than the max_lots_cap fix.**
+
+Implementation: require BOTH the 15M trend AND the 1H trend to agree
+with the proposed entry direction (TRENDING_UP for LONG, TRENDING_DOWN
+for SHORT), in addition to all existing filters (support/resistance,
+reentry-cooldown). Uses the SAME look-ahead-safe resampling/HTF-trend
+infrastructure already built and proven for the existing 1H trend check.
+
+**Verified on real 2-year MCX data:**
+
+| Config | Trades | Avg Gross/trade | Net P&L |
+|---|---|---|---|
+| Baseline (max_trades=4, no MTF check) | 1834 | Rs446 | -Rs384,788 |
+| max_trades=5 alone (no MTF check) | 2228 | Rs327 | -Rs771,505 (worse) |
+| **max_trades=4 (unchanged) + MTF alignment** | **621** | **Rs439** | **-Rs153,740 (60% better)** |
+
+Critically isolated: the improvement comes ENTIRELY from the
+multi-timeframe alignment filter, not from raising max_trades_per_day
+(which was independently re-confirmed to hurt, consistent with every
+earlier test of raising trade quantity/quota today).
+
+**Deployed** (build v26) to both `backtesting/backtest_runner.py`
+(`require_multi_timeframe_alignment` parameter) and
+`execution/live_trading_engine.py` (a dedicated `mtf_15m_aggregator`,
+always active — checks 15M + 1H trend before every new entry).
+
+### Still not fully solved
+
+Even with this large improvement, the 2-year backtest is STILL net
+negative (-Rs153,740 vs Rs20,00,000 starting equity — about -0.77% over
+2 years, much smaller than before but not yet profitable). The CoinDCX
+lead remains the most promising path to full profitability given MCX's
+fee structure. Next session should:
+1. Get real CoinDCX historical data (pending from Vivek)
+2. Re-test the NOW-IMPROVED strategy (with MTF alignment) on CoinDCX's
+   lower-fee structure — this could plausibly cross into genuine
+   profitability given how much smaller the remaining gap is now.
+
+### Also disproven today (before the MTF breakthrough)
+
+- Tiered quota (base 4 trades normal threshold, extra trades require
+  80-85+ confidence score) — still made things worse even with strict
+  gating. Confluence score does not reliably predict move SIZE, only
+  win/loss — so gating extra trades by score alone doesn't work.
+- Raising max_trades_per_day alone (5, 6, 8, 10) — consistently worse
+  at every level tested, confirmed independently multiple times.

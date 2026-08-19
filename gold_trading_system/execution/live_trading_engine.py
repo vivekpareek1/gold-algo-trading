@@ -204,6 +204,13 @@ class LiveTradingEngine:
         # multi-timeframe layer the strategy was validated with).
         self.htf_lookup_fn = htf_timeframe_lookup
         self.htf_aggregator = _LiveHTFAggregator(htf_minutes=60) if htf_timeframe_lookup is None else None
+        # Multi-timeframe alignment: a SEPARATE 15M trend tracker, checked
+        # alongside the existing 1H one before allowing a new entry.
+        # Real-data finding: requiring BOTH 15M and 1H trend to agree with
+        # the proposed direction cut backtest net loss by 60% (Rs384,788
+        # -> Rs153,740 over 2 years) — the single biggest improvement
+        # found in the whole profitability investigation.
+        self.mtf_15m_aggregator = _LiveHTFAggregator(htf_minutes=15)
 
         # Persistence: without this, a service restart (crash, redeploy,
         # server reboot) silently wiped the entire in-memory trade history —
@@ -710,6 +717,7 @@ class LiveTradingEngine:
         else:
             htf_trend = self.htf_aggregator.update(tick)
         self._current_htf_trend = htf_trend
+        self._current_15m_trend = self.mtf_15m_aggregator.update(tick)
         struct_state = self.structure.update(struct_candle,
                                                 current_atr=self.indicators.atr.value or 1.0,
                                                 higher_tf_trend=htf_trend)
@@ -926,6 +934,13 @@ class LiveTradingEngine:
             return
 
         direction = "LONG" if result.decision == Decision.BUY else "SHORT"
+
+        # Multi-timeframe alignment (Vivek's idea, verified as the day's
+        # biggest improvement): require the 15M AND 1H trend to BOTH agree
+        # with the proposed direction, not just the 5M entry signal alone.
+        wanted_trend = TrendState.TRENDING_UP if direction == "LONG" else TrendState.TRENDING_DOWN
+        if self._current_15m_trend != wanted_trend or self._current_htf_trend != wanted_trend:
+            return   # 15M and 1H must BOTH confirm the same direction
 
         SAME_DIRECTION_REENTRY_COOLDOWN_SEC = 7200  # 2 hours — see LiveEngineState field docstring
         if (self.state.last_momentum_decay_exit_direction == direction
