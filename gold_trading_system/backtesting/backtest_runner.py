@@ -98,6 +98,7 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   require_london_ny_overlap: bool | None = None,
                   require_volatility_expansion: bool | None = None,
                   volatility_expansion_mult: float = 1.3,
+                  require_rsi_macd_momentum: bool | None = None,
                   starting_equity_inr: float = 500_000.0,
                   base_trades_normal_threshold: int | None = None,
                   extended_trades_min_confidence: float = 80.0,
@@ -383,6 +384,25 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             atr_avg = ind_result["atr_avg_20"] or ind_result["atr"] or 1.0
             if ind_result["atr"] < atr_avg * volatility_expansion_mult:
                 continue
+
+        # Vivek's alternative to ATR-based "is there movement": ATR only
+        # measures candle SIZE, not genuine directional PUSH — a market
+        # can have big, choppy, non-directional candles. RSI + MACD are
+        # momentum oscillators that specifically show directional
+        # conviction, which day traders traditionally use over ATR
+        # (a volatility/range measure more associated with position
+        # sizing / longer-horizon stop placement).
+        if require_rsi_macd_momentum:
+            rsi = ind_result["rsi"]
+            macd_hist = ind_result["macd_hist"]
+            macd_hist_prev = ind_result["macd_hist_prev"]
+            macd_accelerating = abs(macd_hist) > abs(macd_hist_prev)
+            if direction == "LONG":
+                if not (rsi > 55 and macd_hist > 0 and macd_accelerating):
+                    continue
+            else:
+                if not (rsi < 45 and macd_hist < 0 and macd_accelerating):
+                    continue
 
         if require_near_support_resistance:
             atr_now = ind_result["atr"] or 10.0

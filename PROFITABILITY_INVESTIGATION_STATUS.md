@@ -204,3 +204,36 @@ Current (end of day, both fixes deployed): -Rs57,380 (165 trades)
 to breakeven is now much smaller. Combined with the CoinDCX cost
 advantage (still pending real data), full profitability seems
 increasingly plausible for the next session.**
+
+## Tested and NOT deployed (2026-08-19) — RSI/MACD momentum vs ATR volatility
+
+Vivek's challenge: ATR measures candle SIZE, not directional momentum —
+suggested RSI + MACD (day-trader-standard momentum oscillators) instead.
+Valid theoretical point, tested empirically rather than dismissed.
+
+Implementation tested: for LONG, require RSI > 55 AND MACD histogram
+positive AND accelerating (|macd_hist| > |macd_hist_prev|); symmetric
+for SHORT.
+
+**Result: did NOT outperform the currently-deployed ATR-based filter.**
+
+| Config | Trades | Avg Gross/trade | Net P&L |
+|---|---|---|---|
+| Currently deployed (MTF + ATR expansion) | 165 | Rs385 | -Rs57,380 |
+| RSI+MACD replacing ATR | 25 | **-Rs677 (negative)** | -Rs29,705 |
+| All three combined (MTF+ATR+RSI/MACD) | 3 | -Rs282 | -Rs2,272 (meaningless sample) |
+
+RSI+MACD as tested was too restrictive (small sample) AND showed
+negative average gross P&L — worse selection than the ATR-based filter,
+at least with these specific threshold values (RSI 55/45, MACD
+sign+acceleration). The parameter (`require_rsi_macd_momentum`) is left
+in the codebase for future experimentation with different thresholds,
+but NOT activated in the live engine — the deployed ATR-based
+volatility expansion + MTF alignment remains the best-tested
+configuration.
+
+**Conclusion: keep the current deployed system (v27) as-is.** If
+revisiting RSI/MACD-based filtering in the future, try different
+threshold values (this test used fairly loose RSI 55/45 cutoffs — a
+stricter or differently-defined "momentum" condition might perform
+differently, untested).
