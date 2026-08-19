@@ -79,7 +79,39 @@ next session.**
   and check the AGGREGATE net P&L impact versus the current deployed
   baseline (+0.596R / cap=10 / current partial-booking fix).
 
-## Key data file
+## MAJOR NEW LEAD (2026-08-19, end of session) — CoinDCX gold trading
+
+Vivek has a CoinDCX account. Verified via search: CoinDCX genuinely offers
+real, tradeable gold-linked instruments — **XAU-USDT** (gold-linked
+perpetual futures) and **PAXG-USDT/PAXG-INR** (gold-backed token,
+1:1 tracks real gold price), with a flat **0.01% maker/taker fee**
+(much simpler than MCX's CTT+exchange+GST+stamp-duty stack), AND
+**24/7 trading** (no MCX-style limited session hours).
+
+**Quick verified cost comparison** (same-size position, ~100g gold notional):
+- MCX charges (measured today, real): ~₹470/trade
+- CoinDCX equivalent (0.01% x2 sides): ~₹310/trade
+- **~34% cheaper**, which is meaningful given today's finding that average
+  gross profit/trade (₹200-450) was barely below average charges — a
+  ~34% charges reduction could be enough to tip the SAME exact strategy
+  logic into genuine profitability, without needing any strategy redesign.
+
+**This is now the most promising, concrete next step — more promising
+than any of the position-sizing/timeframe experiments tried today.**
+
+### What's needed to properly test this next session:
+1. Real historical XAU-USDT or PAXG-USDT 5-min OHLCV data (need to source
+   this — check if CoinDCX has a public historical data API, or export
+   from their charts, or a data vendor)
+2. A CoinDCX-specific charges calculator (simple — just flat 0.01% each
+   side of turnover, no CTT/GST/stamp-duty/SEBI-fee complexity)
+3. Re-run the EXACT SAME strategy logic (support/resistance filter,
+   reentry-cooldown, momentum-decay exits, partial-booking — all already
+   built and tested) on this new data + cost model
+4. Given 24/7 trading, reconsider whether session-hour-based logic
+   (day-boundary resets, London-NY-style filters) needs adjusting
+5. Compare the result directly against today's MCX baseline
+
 
 Real 2-year MCX 5-minute OHLCV data used for all backtests:
 `/mnt/user-data/uploads/mcx_goldm_5min.csv` (in Claude's sandbox — will
