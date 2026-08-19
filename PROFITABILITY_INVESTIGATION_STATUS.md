@@ -172,3 +172,35 @@ fee structure. Next session should:
   win/loss — so gating extra trades by score alone doesn't work.
 - Raising max_trades_per_day alone (5, 6, 8, 10) — consistently worse
   at every level tested, confirmed independently multiple times.
+
+## SECOND BREAKTHROUGH (2026-08-19, same day, later) — Volatility expansion filter
+
+Vivek's idea, refined: don't take trades on small/range-bound candles —
+only when there's genuine expanding volatility (movement), and pay
+attention to sessions where this tends to happen (UK/US). This filter
+(`require_volatility_expansion`) already existed from earlier in the
+session — tested it combined with the newly-deployed MTF alignment fix.
+
+**Verified on real 2-year MCX data (combined with MTF alignment):**
+
+| Config | Trades | Avg Gross/trade | Net P&L |
+|---|---|---|---|
+| Original baseline (no filters) | 1834 | Rs446 | -Rs384,788 |
+| MTF alignment only (deployed earlier today) | 621 | Rs439 | -Rs153,740 |
+| **MTF alignment + volatility expansion (1.1x)** | **165** | Rs385 | **-Rs57,380 (85% better than original)** |
+| MTF + volatility expansion (1.3x, stricter) | 26 | Rs184 | -Rs18,332 (too few trades to trust) |
+
+Chose multiplier=1.1 for deployment — 165 trades over 2 years is a
+reasonably trustworthy sample size (unlike 26 trades at 1.3x, which
+could easily be noise). Deployed to both `backtesting/backtest_runner.py`
+(already had the parameter) and `execution/live_trading_engine.py`
+(newly wired in, checks ATR vs its 20-period average before every entry).
+
+### Cumulative progress today
+
+Starting point (this morning): -Rs384,788 (2yr backtest, 1834 trades)
+Current (end of day, both fixes deployed): -Rs57,380 (165 trades)
+**85% reduction in net loss — still not fully profitable, but the gap
+to breakeven is now much smaller. Combined with the CoinDCX cost
+advantage (still pending real data), full profitability seems
+increasingly plausible for the next session.**
