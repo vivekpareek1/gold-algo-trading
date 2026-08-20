@@ -955,6 +955,15 @@ class LiveTradingEngine:
         if ind_result["atr"] < atr_avg * VOLATILITY_EXPANSION_MULT:
             return   # current volatility isn't genuinely expanding — skip
 
+        # London-NY session restriction (Vivek's request, verified
+        # promising on real data — see config/settings.py RiskConfig
+        # docstring for the exact numbers and the small-sample caveat).
+        if self.config.risk.require_london_ny_session:
+            entry_dt = datetime.fromtimestamp(tick.ts, tz=timezone.utc)
+            entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
+            if not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30):
+                return   # outside the 13:30-17:30 UTC London-NY overlap window
+
         SAME_DIRECTION_REENTRY_COOLDOWN_SEC = 7200  # 2 hours — see LiveEngineState field docstring
         if (self.state.last_momentum_decay_exit_direction == direction
                 and self.state.last_momentum_decay_exit_ts is not None

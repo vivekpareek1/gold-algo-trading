@@ -102,6 +102,9 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   starting_equity_inr: float = 500_000.0,
                   base_trades_normal_threshold: int | None = None,
                   extended_trades_min_confidence: float = 80.0,
+                  extended_trades_require_uk_us_session: bool = False,
+                  exceptional_conviction_threshold: float | None = None,
+                  exceptional_conviction_risk_multiplier: float = 2.0,
                   require_multi_timeframe_alignment: bool | None = None,
                   verbose: bool = False) -> BacktestResult:
     """
@@ -346,6 +349,11 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             if trades_today_so_far >= base_trades_normal_threshold:
                 if result.confidence < extended_trades_min_confidence:
                     continue
+                if extended_trades_require_uk_us_session:
+                    entry_hour_utc = datetime.fromtimestamp(candle.ts, tz=timezone.utc).hour
+                    # UK afternoon + US session, roughly 13:00-21:00 UTC
+                    if not (13 <= entry_hour_utc < 21):
+                        continue
 
         direction = "LONG" if result.decision == Decision.BUY else "SHORT"
 
@@ -366,8 +374,11 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         nearest_swing_high = (struct_state.swing_highs[-1].price if struct_state.swing_highs else None)
 
         if require_london_ny_overlap:
-            entry_hour_utc = datetime.fromtimestamp(candle.ts, tz=timezone.utc).hour
-            if not (13 <= entry_hour_utc < 17):
+            entry_dt = datetime.fromtimestamp(candle.ts, tz=timezone.utc)
+            entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
+            # 13:30-17:30 UTC (18:30-22:30 IST) — the specific London-NY
+            # overlap window Vivek requested.
+            if not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30):
                 continue
 
         # Real-data finding: LONG entries far from a recent swing low
@@ -443,6 +454,23 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             entry_price=entry_price, stop_price=stop_price,
             live_equity_inr=broker.get_balance().equity_inr, risk_reward=risk_reward,
         )
+        # EXPERIMENTAL, explicitly requested test: normally confidence
+        # affects whether to trade, never how much to risk (deliberate
+        # design principle — avoids over-trusting the confluence score's
+        # magnitude, which has NOT been shown to reliably predict move
+        # SIZE, only win/loss, per earlier same-day testing). Testing
+        # this anyway on explicit request: does giving genuinely
+        # EXCEPTIONAL setups (score >= threshold) a bigger risk budget,
+        # mimicking discretionary-trader judgment, actually help?
+        if (exceptional_conviction_threshold is not None
+                and result.confidence >= exceptional_conviction_threshold
+                and sizing.approved):
+            boosted_risk_budget = config.risk.max_risk_per_trade_inr * exceptional_conviction_risk_multiplier
+            risk_per_lot_inr = abs(entry_price - stop_price) * config.instrument.point_value_inr
+            if risk_per_lot_inr > 0:
+                boosted_lots = min(int(boosted_risk_budget / risk_per_lot_inr), config.risk.max_lots_cap)
+                if boosted_lots > sizing.lots:
+                    sizing.lots = boosted_lots
         if not sizing.approved:
             continue
 

@@ -61,6 +61,14 @@ class RiskConfig(BaseModel):
     # REAL, meaningful ceiling — this cap is now just a sanity backstop
     # above that, not the binding constraint.
 
+    require_london_ny_session: bool = True   # Vivek's request: restrict
+    # entries to 13:30-17:30 UTC (London-NY overlap). Verified on real
+    # 2-year data combined with MTF alignment + volatility expansion:
+    # net loss dropped from Rs57,380 to Rs10,223 (82% better) — but on
+    # only 32 trades over 2 years, a genuinely small sample. Promising,
+    # not yet fully proven at scale. Set to False to trade all hours
+    # again if this turns out to be too restrictive in live use.
+
     equity_source: Literal["LIVE"] = "LIVE"   # never hardcoded
     equity_refresh_interval_minutes: int = 15
     equity_min_safety_buffer_pct: float = 20.0  # refuse to trade if margin+buffer > equity

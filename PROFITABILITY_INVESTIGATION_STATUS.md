@@ -237,3 +237,32 @@ revisiting RSI/MACD-based filtering in the future, try different
 threshold values (this test used fairly loose RSI 55/45 cutoffs — a
 stricter or differently-defined "momentum" condition might perform
 differently, untested).
+
+## DEPLOYED (2026-08-19, later) — London-NY session restriction
+
+Vivek's explicit request to implement (after testing showed a promising
+but small-sample result). Restricts new entries to 13:30-17:30 UTC
+(18:30-22:30 IST), combined with all other deployed filters (MTF
+alignment, volatility expansion, support/resistance, reentry-cooldown).
+
+**Real 2-year backtest result:** net loss dropped from Rs57,380 to
+Rs10,223 (82% better) — but on only 32 trades over 2 years, a genuinely
+small sample. Deployed as `config.risk.require_london_ny_session = True`
+(default), toggleable to False if it proves too restrictive in live use.
+
+### Cumulative progress, full day
+
+| Stage | Trades (2yr) | Net P&L |
+|---|---|---|
+| Original baseline (this morning) | 1834 | -Rs384,788 |
+| + MTF alignment | 621 | -Rs153,740 |
+| + Volatility expansion | 165 | -Rs57,380 |
+| **+ London-NY session restriction** | **32** | **-Rs10,223** |
+
+**97.3% cumulative reduction in net loss from this morning's baseline.**
+Still not fully profitable, and the sample size at this final stage (32
+trades/2yr) is small enough that real live-trading results should be
+watched carefully — this configuration is promising but not yet proven
+at a fully trustworthy sample size. Next session: CoinDCX data (still
+pending) could be the final piece to cross into genuine profitability,
+now that the gap remaining is very small.

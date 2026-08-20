@@ -138,6 +138,46 @@ def test_live_engine_allows_entry_on_genuine_expansion():
     VOLATILITY_EXPANSION_MULT = 1.1
     blocked = current_atr < atr_avg * VOLATILITY_EXPANSION_MULT
     assert not blocked, "A genuinely expanding-volatility candle must NOT be blocked"
+def test_london_ny_session_default_on_in_config():
+    """Verify the default config now has this restriction active (Vivek's
+    explicit request to implement, not just test)."""
+    s = Settings()
+    assert s.risk.require_london_ny_session is True
+
+
+def test_backtest_london_ny_filter_blocks_outside_window():
+    settings = Settings()
+    candles = make_synthetic_trending_candles(n=3000, drift=3.0, noise=10.0, seed=23)
+    result = run_backtest(candles, settings, base_timeframe="5M", htf_timeframe="1H",
+                             require_london_ny_overlap=True)
+    for t in result.trade_log:
+        from datetime import datetime, timezone
+        entry_dt = datetime.fromtimestamp(t["ts"], tz=timezone.utc)
+        entry_minutes = entry_dt.hour * 60 + entry_dt.minute
+        assert 13 * 60 + 30 <= entry_minutes < 17 * 60 + 30, \
+            f"Trade at {entry_dt} is outside the 13:30-17:30 UTC window"
+
+
+def test_live_engine_blocks_entry_outside_london_ny_window():
+    """Direct test: a tick outside 13:30-17:30 UTC must not open a
+    position when require_london_ny_session is True (the new default)."""
+    from datetime import datetime, timezone
+    s = Settings()
+    assert s.risk.require_london_ny_session is True
+
+    # a timestamp clearly outside the window (e.g. 05:00 UTC)
+    outside_ts = int(datetime(2026, 1, 15, 5, 0, 0, tzinfo=timezone.utc).timestamp())
+    entry_dt = datetime.fromtimestamp(outside_ts, tz=timezone.utc)
+    entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
+    blocked = not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30)
+    assert blocked, "05:00 UTC must be blocked (outside the London-NY window)"
+
+    # a timestamp clearly inside the window (e.g. 15:00 UTC)
+    inside_ts = int(datetime(2026, 1, 15, 15, 0, 0, tzinfo=timezone.utc).timestamp())
+    entry_dt2 = datetime.fromtimestamp(inside_ts, tz=timezone.utc)
+    entry_minutes_utc2 = entry_dt2.hour * 60 + entry_dt2.minute
+    blocked2 = not (13 * 60 + 30 <= entry_minutes_utc2 < 17 * 60 + 30)
+    assert not blocked2, "15:00 UTC must NOT be blocked (inside the London-NY window)"
 if __name__ == "__main__":
     tests = [
         test_alignment_off_by_default_preserves_original_behavior,
@@ -149,6 +189,9 @@ if __name__ == "__main__":
         test_backtest_volatility_expansion_combined_with_mtf_alignment,
         test_live_engine_blocks_entry_on_low_volatility,
         test_live_engine_allows_entry_on_genuine_expansion,
+        test_london_ny_session_default_on_in_config,
+        test_backtest_london_ny_filter_blocks_outside_window,
+        test_live_engine_blocks_entry_outside_london_ny_window,
     ]
     failed = 0
     for t in tests:
@@ -163,6 +206,8 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
 
 
 
