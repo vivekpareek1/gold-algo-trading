@@ -96,9 +96,12 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
                   require_near_support_resistance: bool | None = None,
                   support_resistance_proximity_atr_mult: float = 1.5,
                   require_london_ny_overlap: bool | None = None,
+                  use_wider_movement_windows: bool = False,
+                  use_split_morning_evening_caps: bool = False,
                   require_volatility_expansion: bool | None = None,
                   volatility_expansion_mult: float = 1.3,
                   require_rsi_macd_momentum: bool | None = None,
+                  require_gold_tactical_cci_confirmation: bool | None = None,
                   starting_equity_inr: float = 500_000.0,
                   base_trades_normal_threshold: int | None = None,
                   extended_trades_min_confidence: float = 80.0,
@@ -188,6 +191,8 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
     # was capped at exactly max_trades_per_day trades regardless of how much
     # data was fed in, which invalidated every metric produced so far.
     current_day: object = None
+    morning_window_trades_today = 0
+    evening_window_trades_today = 0
     disabled_since_day: object = None
 
     for i, candle in enumerate(candles):
@@ -201,6 +206,8 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         elif candle_day != current_day:
             risk_engine.state.trades_taken_today = 0
             risk_engine.state.daily_pnl_inr = 0.0
+            morning_window_trades_today = 0
+            evening_window_trades_today = 0
             # BUGFIX: trading_disabled (set after max_consecutive_losses) had
             # no reset path anywhere — a real system correctly requires manual
             # human review before resuming (per spec), but a backtest replay
@@ -376,10 +383,25 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         if require_london_ny_overlap:
             entry_dt = datetime.fromtimestamp(candle.ts, tz=timezone.utc)
             entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
-            # 13:30-17:30 UTC (18:30-22:30 IST) — the specific London-NY
-            # overlap window Vivek requested.
-            if not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30):
-                continue
+            if use_wider_movement_windows:
+                # Vivek's own market observation: morning (9-11 AM IST =
+                # 3:30-5:30 UTC) and evening (4-9 PM IST = 10:30-15:30
+                # UTC) both show significant movement — wider than the
+                # narrow London-NY-only window.
+                in_morning = (3 * 60 + 30 <= entry_minutes_utc < 5 * 60 + 30)
+                in_evening = (10 * 60 + 30 <= entry_minutes_utc < 15 * 60 + 30)
+                if not (in_morning or in_evening):
+                    continue
+                if use_split_morning_evening_caps:
+                    if in_morning and morning_window_trades_today >= 2:
+                        continue
+                    if in_evening and evening_window_trades_today >= 4:
+                        continue
+            else:
+                # 13:30-17:30 UTC (18:30-22:30 IST) — the specific
+                # London-NY overlap window Vivek originally requested.
+                if not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30):
+                    continue
 
         # Real-data finding: LONG entries far from a recent swing low
         # (support) and SHORT entries far from a recent swing high
@@ -395,6 +417,20 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
             atr_avg = ind_result["atr_avg_20"] or ind_result["atr"] or 1.0
             if ind_result["atr"] < atr_avg * volatility_expansion_mult:
                 continue
+
+        # Gold Tactical CCI momentum-confirmation (Vivek's shared Pine
+        # Script, reimplemented — see indicators/incremental.py
+        # GoldTacticalCCIState). Requires the CCI oscillator to have JUST
+        # crossed its extreme threshold in the SAME direction as the
+        # proposed entry — confirms genuine, extended momentum is
+        # actively building, not just present.
+        if require_gold_tactical_cci_confirmation:
+            if direction == "LONG":
+                if not ind_result.get("gold_tactical_cci_crossed_above"):
+                    continue
+            else:
+                if not ind_result.get("gold_tactical_cci_crossed_below"):
+                    continue
 
         # Vivek's alternative to ATR-based "is there movement": ATR only
         # measures candle SIZE, not genuine directional PUSH — a market
@@ -492,6 +528,14 @@ def run_backtest(candles: list[OHLCV], config, htf_trend_override: TrendState | 
         open_trade_entry_regime = situation.regime.value
         open_trade_lots = sizing.lots
         risk_engine.register_position_opened()
+        if use_split_morning_evening_caps and require_london_ny_overlap and use_wider_movement_windows:
+            entry_minutes_check = datetime.fromtimestamp(candle.ts, tz=timezone.utc).hour * 60 + \
+                                     datetime.fromtimestamp(candle.ts, tz=timezone.utc).minute
+            if 3 * 60 + 30 <= entry_minutes_check < 5 * 60 + 30:
+                morning_window_trades_today += 1
+            elif 10 * 60 + 30 <= entry_minutes_check < 15 * 60 + 30:
+                evening_window_trades_today += 1
+
 
     metrics = compute_metrics(r_multiples)
     return BacktestResult(metrics=metrics, trade_log=trade_log, signal_log=signal_log)

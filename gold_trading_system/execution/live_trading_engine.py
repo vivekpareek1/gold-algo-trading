@@ -165,6 +165,8 @@ class LiveEngineState:
     # trading platforms compare against the DAY'S OPEN (or previous close);
     # this is set once, on the first candle of each new trading day.
     day_open_price: float | None = None
+    morning_window_trades_today: int = 0
+    evening_window_trades_today: int = 0
     # Real trading platforms compute "change" against the PREVIOUS trading
     # day's closing price, not today's opening price (which can gap from
     # yesterday's close — international gold trades near 24hrs, so this
@@ -768,6 +770,8 @@ class LiveTradingEngine:
 
         self.risk_engine.state.trades_taken_today = 0
         self.risk_engine.state.daily_pnl_inr = 0.0
+        self.state.morning_window_trades_today = 0
+        self.state.evening_window_trades_today = 0
         self.state.real_daily_net_pnl_inr = 0.0
         self.state.day_open_price = tick.open
 
@@ -955,14 +959,22 @@ class LiveTradingEngine:
         if ind_result["atr"] < atr_avg * VOLATILITY_EXPANSION_MULT:
             return   # current volatility isn't genuinely expanding — skip
 
-        # London-NY session restriction (Vivek's request, verified
-        # promising on real data — see config/settings.py RiskConfig
-        # docstring for the exact numbers and the small-sample caveat).
+        # Vivek's spec: morning window (9-11 AM IST = 3:30-5:30 UTC, max
+        # 2 trades) + evening window (4-9:30 PM IST = 10:30-16:00 UTC,
+        # max 4 trades). Deployed directly per explicit request, without
+        # the full real-data backtest validation given to earlier
+        # filters today — monitor live results carefully.
         if self.config.risk.require_london_ny_session:
             entry_dt = datetime.fromtimestamp(tick.ts, tz=timezone.utc)
             entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
-            if not (13 * 60 + 30 <= entry_minutes_utc < 17 * 60 + 30):
-                return   # outside the 13:30-17:30 UTC London-NY overlap window
+            in_morning = (3 * 60 + 30 <= entry_minutes_utc < 5 * 60 + 30)
+            in_evening = (10 * 60 + 30 <= entry_minutes_utc < 16 * 60)
+            if not (in_morning or in_evening):
+                return
+            if in_morning and self.state.morning_window_trades_today >= 2:
+                return
+            if in_evening and self.state.evening_window_trades_today >= 4:
+                return
 
         SAME_DIRECTION_REENTRY_COOLDOWN_SEC = 7200  # 2 hours — see LiveEngineState field docstring
         if (self.state.last_momentum_decay_exit_direction == direction
@@ -1061,6 +1073,13 @@ class LiveTradingEngine:
         self.state.open_trade_entry_regime = situation.regime.value
         self.state.open_trade_lots = sizing.lots
         self.risk_engine.register_position_opened()
+        if self.config.risk.require_london_ny_session:
+            entry_dt = datetime.fromtimestamp(tick.ts, tz=timezone.utc)
+            entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
+            if 3 * 60 + 30 <= entry_minutes_utc < 5 * 60 + 30:
+                self.state.morning_window_trades_today += 1
+            elif 10 * 60 + 30 <= entry_minutes_utc < 16 * 60:
+                self.state.evening_window_trades_today += 1
         self._persist_open_position()
 
     def _build_snapshot(self, tick: LiveTick, struct_state, ind_result: dict) -> dict:
