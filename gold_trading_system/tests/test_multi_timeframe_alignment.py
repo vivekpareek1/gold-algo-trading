@@ -178,6 +178,47 @@ def test_live_engine_blocks_entry_outside_london_ny_window():
     entry_minutes_utc2 = entry_dt2.hour * 60 + entry_dt2.minute
     blocked2 = not (13 * 60 + 30 <= entry_minutes_utc2 < 17 * 60 + 30)
     assert not blocked2, "15:00 UTC must NOT be blocked (inside the London-NY window)"
+def test_restart_replay_sets_trend_attributes_not_leaving_them_unset():
+    """
+    CRITICAL BUGFIX (real incident, found via a live debug session): after
+    every restart, the warmup-replay path updated the aggregators'
+    INTERNAL trend state, but never synced it into the engine-level
+    _current_htf_trend / _current_15m_trend attributes that the actual
+    MTF-alignment entry gate reads — meaning EVERY restart silently
+    blocked ALL entries (both attributes stayed unset) until the first
+    genuinely live tick arrived. Confirmed live: tick_count=0,
+    current_15m_trend_raw="ATTRIBUTE_NOT_SET" despite indicators (ATR)
+    already being warmed up and showing real values.
+    """
+    import tempfile, os
+    from config.settings import Settings
+    from execution.live_trading_engine import LiveTradingEngine, LiveTick
+    from execution.broker_adapters.paper_provider import PaperBrokerProvider
+
+    with tempfile.TemporaryDirectory() as d:
+        candle_path = os.path.join(d, "candles.jsonl")
+
+        broker1 = PaperBrokerProvider(starting_equity_inr=500_000.0)
+        broker1.connect()
+        e1 = LiveTradingEngine(Settings(), broker1, symbol="GOLDM", persistence_path=None,
+                                  candle_persistence_path=candle_path, open_position_path=None)
+        base_ts = 1735689600
+        for i in range(200):
+            e1.on_tick(LiveTick(ts=base_ts + i * 300, open=155000 + i * 3, high=155010 + i * 3,
+                                  low=154990 + i * 3, close=155005 + i * 3, volume=100))
+
+        broker2 = PaperBrokerProvider(starting_equity_inr=500_000.0)
+        broker2.connect()
+        e2 = LiveTradingEngine(Settings(), broker2, symbol="GOLDM", persistence_path=None,
+                                  candle_persistence_path=candle_path, open_position_path=None)
+
+        assert e2.state.tick_count == 0, "tick_count must stay 0 after pure replay (no live tick yet)"
+        assert e2._current_15m_trend is not None, \
+            "15M trend must be populated by replay, not left unset"
+        assert e2._current_htf_trend is not None, \
+            "1H trend must be populated by replay, not left unset"
+        assert isinstance(e2._current_15m_trend, TrendState)
+        assert isinstance(e2._current_htf_trend, TrendState)
 if __name__ == "__main__":
     tests = [
         test_alignment_off_by_default_preserves_original_behavior,
@@ -192,6 +233,7 @@ if __name__ == "__main__":
         test_london_ny_session_default_on_in_config,
         test_backtest_london_ny_filter_blocks_outside_window,
         test_live_engine_blocks_entry_outside_london_ny_window,
+        test_restart_replay_sets_trend_attributes_not_leaving_them_unset,
     ]
     failed = 0
     for t in tests:
@@ -206,6 +248,8 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
 
 
 

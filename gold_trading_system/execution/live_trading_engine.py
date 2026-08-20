@@ -532,10 +532,23 @@ class LiveTradingEngine:
                     replay_tick = LiveTick(ts=c["ts"], open=c["open"], high=c["high"],
                                              low=c["low"], close=c["close"], volume=c["volume"])
                     self.htf_aggregator.update(replay_tick)
+                    self.mtf_15m_aggregator.update(replay_tick)
                 replayed += 1
             except (KeyError, TypeError):
                 continue   # a malformed persisted entry must not abort the whole replay
         if replayed:
+            # BUGFIX (real incident): the aggregators' INTERNAL trend state
+            # got updated during replay above, but the engine-level
+            # _current_htf_trend / _current_15m_trend attributes (what the
+            # actual MTF-alignment entry gate reads) are normally only set
+            # inside on_tick() — meaning after every restart, MTF-alignment
+            # silently blocked EVERY entry (both attributes stayed unset)
+            # until the first genuinely live tick arrived, however long
+            # that took. Sync them explicitly here so a restart doesn't
+            # leave entries blocked on stale/missing trend state.
+            if self.htf_aggregator is not None:
+                self._current_htf_trend = self.htf_aggregator.current_trend
+            self._current_15m_trend = self.mtf_15m_aggregator.current_trend
             print(f"Replayed {replayed} persisted candles to warm up indicators — "
                   f"no multi-hour wait needed after this restart.")
             if replayed >= 30:
