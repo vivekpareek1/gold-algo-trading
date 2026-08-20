@@ -266,3 +266,46 @@ watched carefully — this configuration is promising but not yet proven
 at a fully trustworthy sample size. Next session: CoinDCX data (still
 pending) could be the final piece to cross into genuine profitability,
 now that the gap remaining is very small.
+
+## Tested and disproven (2026-08-19, later) — VWAP/EMA pullback + rejection candle
+
+From AI Mode research doc Vivek shared: "classic" day-trading pattern —
+price pulls back to VWAP or EMA21, forms a rejection candle (pin bar or
+engulfing), enter in the direction of the higher-timeframe EMA stack.
+Built pin-bar and engulfing detection from scratch (didn't exist in the
+codebase), tested on real 2-year MCX data.
+
+**Result: clearly does NOT work on this instrument/data.**
+
+| Metric | Value |
+|---|---|
+| Trades | 1012 |
+| Win rate | 32.8% |
+| Expectancy | -0.016R (negative even before charges) |
+| Total gross | -Rs50,586 (negative — the pattern itself has no edge here) |
+| Total NET | -Rs416,649 |
+
+Much worse than the currently-deployed system (+0.596R expectancy,
+-Rs57,380 net). This specific "classic" pattern is now considered
+tested and disproven for this instrument — no need to revisit unless
+implemented meaningfully differently (e.g., different proximity
+threshold, different candle-pattern strictness).
+
+## Still pending — needs new data before testing
+
+**COMEX price-action-leading strategy** (watch COMEX/XAUUSD's own
+support/resistance breaks as a LEADING signal for MCX entries, not just
+fair-value deviation) — conceptually promising, from the same AI Mode
+research doc, but requires REAL HISTORICAL COMEX/XAUUSD 5-min candle
+data, which isn't available yet. Same blocker as the CoinDCX lead — both
+waiting on external historical data Vivek needs to source.
+
+## Verified via research (2026-08-19) — CTT rate confirmed correct
+
+Vivek's shared research doc claimed CTT = 0.05%, contradicting our
+brokerage_calculator.py's 0.01%. Cross-checked against 10+ authoritative
+sources including MCXCCL (the official clearing corporation) — CTT for
+gold FUTURES (what we trade) is genuinely 0.01% on the sell side. The
+0.05% figure applies to unexercised OPTIONS premiums, a different
+instrument. Our existing calculation was already correct — no change
+needed. Good validation of the day's charges work.
