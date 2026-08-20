@@ -959,11 +959,15 @@ class LiveTradingEngine:
         if ind_result["atr"] < atr_avg * VOLATILITY_EXPANSION_MULT:
             return   # current volatility isn't genuinely expanding — skip
 
-        # Vivek's spec: morning window (9-11 AM IST = 3:30-5:30 UTC, max
-        # 2 trades) + evening window (4-9:30 PM IST = 10:30-16:00 UTC,
-        # max 4 trades). Deployed directly per explicit request, without
-        # the full real-data backtest validation given to earlier
-        # filters today — monitor live results carefully.
+        # Vivek's spec: morning window (9-11 AM IST = 3:30-5:30 UTC, base
+        # cap 2) + evening window (4-9:30 PM IST = 10:30-16:00 UTC, base
+        # cap 4). POOLED: unused morning capacity rolls into the evening
+        # cap (e.g. 0 morning trades taken -> evening cap becomes 6).
+        # Evening capacity does NOT roll backward into morning (morning
+        # always stays capped at its own base of 2 — pooling only flows
+        # forward in the day). Deployed directly per explicit request,
+        # without the full real-data backtest validation given to
+        # earlier filters today — monitor live results carefully.
         if self.config.risk.require_london_ny_session:
             entry_dt = datetime.fromtimestamp(tick.ts, tz=timezone.utc)
             entry_minutes_utc = entry_dt.hour * 60 + entry_dt.minute
@@ -973,8 +977,11 @@ class LiveTradingEngine:
                 return
             if in_morning and self.state.morning_window_trades_today >= 2:
                 return
-            if in_evening and self.state.evening_window_trades_today >= 4:
-                return
+            if in_evening:
+                unused_morning = max(0, 2 - self.state.morning_window_trades_today)
+                pooled_evening_cap = 4 + unused_morning
+                if self.state.evening_window_trades_today >= pooled_evening_cap:
+                    return
 
         SAME_DIRECTION_REENTRY_COOLDOWN_SEC = 7200  # 2 hours — see LiveEngineState field docstring
         if (self.state.last_momentum_decay_exit_direction == direction
