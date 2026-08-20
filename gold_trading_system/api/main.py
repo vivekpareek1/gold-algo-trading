@@ -61,7 +61,7 @@ live_engine = LiveTradingEngine(settings, broker, symbol="GOLDM", persistence_pa
 # code was actually running. This string changes with every deploy, shown
 # prominently in the footer, so it is now immediately, unambiguously
 # checkable from a screenshot rather than inferred from subtle UI details.
-BUILD_VERSION = "2026-08-20-pooled-caps-v30"
+BUILD_VERSION = "2026-08-20-debug-endpoint-v31"
 
 _last_price = 63000.0
 _tick_count = 0
@@ -318,8 +318,40 @@ def get_signal():
     latest = live_engine.state.signal_log[-1]
     return SignalResponse(
         decision=latest["decision"], long_score=latest["long_score"],
-        short_score=latest["short_score"], confidence=0,
+        short_score=latest["short_score"],
+        confidence=max(latest["long_score"], latest["short_score"]),
     )
+
+
+@app.get("/api/entry_filters_debug")
+def get_entry_filters_debug():
+    """
+    Read-only diagnostic: shows the state of every gate a BUY/SELL signal
+    must pass to actually become a trade, so a strong confluence score
+    (e.g. long_score=83) that still didn't trade can be explained without
+    guessing. Added after a real case where this wasn't visible.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    minutes = now.hour * 60 + now.minute
+    in_morning = 3 * 60 + 30 <= minutes < 5 * 60 + 30
+    in_evening = 10 * 60 + 30 <= minutes < 16 * 60
+
+    atr = getattr(live_engine.indicators.atr, "value", None)
+
+    return {
+        "current_utc_time": now.strftime("%H:%M"),
+        "in_morning_window": in_morning,
+        "in_evening_window": in_evening,
+        "morning_trades_today": live_engine.state.morning_window_trades_today,
+        "evening_trades_today": live_engine.state.evening_window_trades_today,
+        "current_15m_trend": getattr(live_engine, "_current_15m_trend", None).value
+                                if getattr(live_engine, "_current_15m_trend", None) else None,
+        "current_1h_trend": getattr(live_engine, "_current_htf_trend", None).value
+                               if getattr(live_engine, "_current_htf_trend", None) else None,
+        "current_atr": atr,
+        "reentry_cooldown_active_direction": live_engine.state.last_momentum_decay_exit_direction,
+    }
 
 
 @app.get("/api/performance", response_model=PerformanceResponse)
