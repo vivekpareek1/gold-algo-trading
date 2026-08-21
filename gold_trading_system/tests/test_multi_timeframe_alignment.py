@@ -219,6 +219,24 @@ def test_restart_replay_sets_trend_attributes_not_leaving_them_unset():
             "1H trend must be populated by replay, not left unset"
         assert isinstance(e2._current_15m_trend, TrendState)
         assert isinstance(e2._current_htf_trend, TrendState)
+def test_charges_calculator_matches_real_angel_one_screenshot():
+    """
+    Verified against a REAL Angel One transaction-charges screenshot:
+    1 lot GOLDM buy at Rs.159758 (trade value Rs.15,97,580), real total
+    charges Rs.97.02 (Brokerage Rs.20 + External Rs.67.10 + Taxes Rs.9.93).
+    Our formula (buy-leg only, using entry=exit to isolate one side)
+    should land within a few rupees of this real, ground-truth number.
+    """
+    from execution.brokerage_calculator import calculate_charges
+    entry = 159758.0
+    result = calculate_charges(direction="LONG", entry_price=entry, exit_price=entry,
+                                  lots=1, point_value_inr=10.0)
+    # result is ROUND-TRIP (both legs); isolate buy-side-only portion
+    buy_side_total = (result.brokerage_inr / 2 + result.exchange_txn_charge_inr / 2 +
+                        result.sebi_fee_inr / 2 + result.stamp_duty_inr +   # stamp is buy-only already
+                        (result.brokerage_inr / 2 + result.exchange_txn_charge_inr / 2) * 0.18)
+    assert abs(buy_side_total - 97.02) < 3.0, \
+        f"Buy-side charges {buy_side_total:.2f} should be within Rs.3 of the real Rs.97.02"
 if __name__ == "__main__":
     tests = [
         test_alignment_off_by_default_preserves_original_behavior,
@@ -234,6 +252,7 @@ if __name__ == "__main__":
         test_backtest_london_ny_filter_blocks_outside_window,
         test_live_engine_blocks_entry_outside_london_ny_window,
         test_restart_replay_sets_trend_attributes_not_leaving_them_unset,
+        test_charges_calculator_matches_real_angel_one_screenshot,
     ]
     failed = 0
     for t in tests:
@@ -248,6 +267,8 @@ if __name__ == "__main__":
             print(f"ERROR: {t.__name__} -> {type(e).__name__}: {e}")
     print(f"\n{len(tests)-failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
 
 
 

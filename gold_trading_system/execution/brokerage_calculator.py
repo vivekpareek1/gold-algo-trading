@@ -31,7 +31,12 @@ from dataclasses import dataclass
 
 BROKERAGE_PER_ORDER_INR = 20.0
 CTT_RATE = 0.0001            # 0.01%, sell leg only
-EXCHANGE_TXN_CHARGE_RATE = 0.000026   # 0.0026%, both legs
+EXCHANGE_TXN_CHARGE_RATE = 0.000021   # 0.0021%, both legs — CORRECTED
+# (was 0.000026/0.0026%) after verifying against a REAL Angel One
+# transaction-charges screenshot (1 lot GOLDM buy, trade value
+# Rs.15,97,580): real total charges Rs.97.02, our old rate predicted
+# Rs.106.17 (~9% too high), corrected rate predicts Rs.96.74 (within
+# Rs.0.28 — rounding-level match).
 GST_RATE = 0.18               # on brokerage + exchange txn charges only
 SEBI_FEE_RATE = 10.0 / 10_000_000   # ₹10 per crore, both legs
 STAMP_DUTY_RATE = 0.00002     # 0.002%, buy leg only
